@@ -1,0 +1,7 @@
+.ai-work/state/
+.ai-work/logs/
+.ai-work/snapshots/
+.ai-work/**/*.lock
+.ai-work/**/*.tmp
+__pycache__/
+*.py[cod]

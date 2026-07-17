@@ -1,0 +1,6 @@
+﻿planning_first: true
+minimal_context: true
+review_required: true
+db_changes_require_plan: true
+no_secrets_in_commits: true
+destructive_operations_require_approval: true

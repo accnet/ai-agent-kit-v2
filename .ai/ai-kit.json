@@ -1,0 +1,7 @@
+﻿{
+  "version": "2.0.0",
+  "runtime": "python-stdlib",
+  "entrypoint": "AGENTS.md",
+  "control_plane": ".ai/engine/ai_kit.py",
+  "state": ".ai-work/state/workflow.json"
+}
