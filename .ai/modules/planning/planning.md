@@ -24,8 +24,9 @@ Assemble intent, breakdown, and acceptance criteria into the final tasks.md.
 
 ## Rules
 - Draft plan with open blockers → get answers before implementation starts
-- Plan changes during execution → edit tasks.md explicitly, never drift silently
+- Plan changes during execution → update `.ai-work/tasks/tasks.md` and the canonical `.ai-work/state/workflow.json`, never drift silently
 - Completed tasks are never deleted — checked off, kept as record
 
 ## Output
-`.ai-work/tasks.md` — the single source of truth for execution state.
+`.ai-work/state/workflow.json` — the single source of truth for execution state;
+`.ai-work/tasks/tasks.md` is its human-readable task artifact.

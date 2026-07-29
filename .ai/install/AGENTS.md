@@ -177,6 +177,20 @@ schema changes, data fixes, seeds, and backfills.
   specific operation, including destructive data changes, force pushes, and
   production deployment.
 
+### Configurable Gates
+
+Gates G1 and G3 are configurable at runtime via `.ai/rules.yaml`. The engine
+loads this file on every `validate()` call and applies the flags below:
+
+| Rule key | Default | Affected gate | Behavior when `false` |
+|---|---|---|---|
+| `planning_first` | `true` | G1 | Allows tasks past `todo` in non-plan phases without completed plan dependencies |
+| `review_required` | `true` | G3 | Allows tasks at `done` status without review evidence |
+
+When a rule file is missing or malformed, the engine falls back to the safe
+defaults shown above. See `.ai/rules.yaml` for the full list of supported
+rules.
+
 When a gate fails, leave the task open and record the failure. Do not hide
 retries or mark partial work complete.
 

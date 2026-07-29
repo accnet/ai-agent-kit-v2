@@ -1,25 +1,12 @@
 {
-  "glm-5.2": "cline -P cline-pass -m 'cline-pass/glm-5.2' --auto-approve true '{prompt}'",
-  "kimi-k3": "cline -P cline-pass -m 'cline-pass/kimi-k3' --auto-approve true '{prompt}'",
-  "deepseek-v4-pro": "cline -P cline-pass -m 'cline-pass/deepseek-v4-pro' --auto-approve true '{prompt}'",
-  "deepseek-v4-flash": "cline -P cline-pass -m 'cline-pass/deepseek-v4-flash' --auto-approve true '{prompt}'",
-  "kimi-k2.7-code": "cline -P cline-pass -m 'cline-pass/kimi-k2.7-code' --auto-approve true '{prompt}'",
-  "kimi-k2.6": "cline -P cline-pass -m 'cline-pass/kimi-k2.6' --auto-approve true '{prompt}'",
-  "mimo-v2.5-pro": "cline -P cline-pass -m 'cline-pass/mimo-v2.5-pro' --auto-approve true '{prompt}'",
-  "mimo-v2.5": "cline -P cline-pass -m 'cline-pass/mimo-v2.5' --auto-approve true '{prompt}'",
-  "minimax-m3": "cline -P cline-pass -m 'cline-pass/minimax-m3' --auto-approve true '{prompt}'",
-  "qwen3.7-max": "cline -P cline-pass -m 'cline-pass/qwen3.7-max' --auto-approve true '{prompt}'",
-  "qwen3.7-plus": "cline -P cline-pass -m 'cline-pass/qwen3.7-plus' --auto-approve true '{prompt}'",
-
-  "cline-claude-3.7-sonnet": "cline -P anthropic -m 'claude-3-7-sonnet-20250219' --auto-approve true '{prompt}'",
-  "cline-claude-3.5-haiku": "cline -P anthropic -m 'claude-3-5-haiku-20241022' --auto-approve true '{prompt}'",
-  "cline-gpt-4o": "cline -P openai -m 'gpt-4o' --auto-approve true '{prompt}'",
-  "cline-o3-mini": "cline -P openai -m 'o3-mini' --auto-approve true '{prompt}'",
-  "cline-deepseek-r1": "cline -P openrouter -m 'deepseek/deepseek-r1' --auto-approve true '{prompt}'",
-
-  "claude-3.7": "claude -p '{prompt}'",
-  "claude-4.8": "claude -p '{prompt}'",
-
-  "codex-5.5": "codex run -m 5.5 '{prompt}'",
-  "codex-5.6": "codex run -m 5.6 '{prompt}'"
+  "cline-pass": "cline -P cline-pass -m 'cline-pass/glm-5.2' --auto-approve true '{prompt}'",
+  "deepseek-v4-pro": "cline -P deepseek -m 'deepseek-v4-pro' --auto-approve true '{prompt}'",
+  "deepseek-v4-flash": "cline -P deepseek -m 'deepseek-v4-flash' --auto-approve true '{prompt}'",
+  "codex-5.5": "echo '' | codex exec -m 5.5 '{prompt}'",
+  "codex-5.6": "echo '' | codex exec -m 5.6 '{prompt}'",
+  "codex-5.6-luna": "echo '' | codex exec -m gpt-5.6-luna '{prompt}'",
+  "codex-opus": "echo '' | codex exec -m opus '{prompt}'",
+  "codex-sonnet": "echo '' | codex exec -m sonnet '{prompt}'",
+  "codex-haiku": "echo '' | codex exec -m haiku '{prompt}'",
+  "codex-auto": "echo '' | codex exec -m gpt-5.6-luna '{prompt}'"
 }

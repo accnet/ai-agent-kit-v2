@@ -1,6 +1,6 @@
 ﻿# Gates
 
-G1 requires `.ai-work/tasks.md` with acceptance criteria before implementation.
+G1 requires `.ai-work/tasks/tasks.md` with acceptance criteria before implementation.
 G2 requires those criteria and relevant verification commands to pass before a
 task is marked complete. G3 requires a recorded reviewer approval. G4 blocks
 secrets and transient `.ai-work/` state from commits. G5 requires explicit user

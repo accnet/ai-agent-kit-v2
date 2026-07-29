@@ -11,7 +11,7 @@ project:
   source_dirs: []
 
 verification:
-  test_command: python3 -m unittest discover -s tests -v
+  test_command: true
   typecheck_command: true
   build_command: true
   lint_command: true

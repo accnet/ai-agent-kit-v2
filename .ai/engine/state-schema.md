@@ -5,7 +5,11 @@ and `events`. A task has `id`, `title`, `owner`, `phase`, `needs`, `status`,
 `acceptance`, `files`, `tags`, `attempts`, `evidence`, `blocked_reason`, and
 `claimed_by`. Phase state is derived: `planned`, `open`, or `complete`.
 `claimed_by` records the actor who started the task; QA and review actors
-must differ from `claimed_by` to enforce independent verification.
+must differ from `claimed_by` to enforce independent verification. The
+`verify` command is read-only: it runs configured checks, emits a report
+dict (`task`, `checks`, `passed`), and never mutates task status, phase
+state, or any lifecycle field — QA and review transitions remain the only
+legal path from `implementation-complete`.
 
 Legal task statuses are `todo`, `in-progress`, `implementation-complete`,
 `qa-passed`, `review-approved`, `done`, and `blocked`.

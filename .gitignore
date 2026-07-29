@@ -1,5 +1,37 @@
-# AI-Kit v2: disposable work state (G4 gate forbids committing these)
+# AI-Kit v2 Runtime State
+# G4 gate forbids committing disposable work state
 .ai-work/
 
+# Python
 __pycache__/
 *.py[cod]
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+
+# Logs
+*.log
+
+# Environment
+.env
+.venv/
+venv/
+ENV/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Temporary files
+*.tmp
+*.bak
+*.orig

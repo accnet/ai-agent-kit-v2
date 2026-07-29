@@ -44,6 +44,47 @@ def _load_registry() -> dict:
     return {"owners": owners, "core_skills": {"names": core_names}}
 
 
+def _load_rules() -> dict:
+    """Load gate rules from .ai/rules.yaml. Returns sensible defaults when the file is missing or malformed.
+
+    This function enables configurable gates (G1, G3) by reading boolean flags
+    from a YAML-like file at .ai/rules.yaml. It uses regex parsing (no PyYAML
+    dependency) and returns safe defaults (all True) on any error. Each line is
+    expected as ``key: value``. Supported values: true/yes/on, false/no/off.
+    """
+    defaults = {
+        "planning_first": True,       # G1 - enforce plan-phase dependencies
+        "minimal_context": True,      # load only minimal task context
+        "review_required": True,      # G3 - require review evidence before done
+        "db_changes_require_plan": True,  # db/migration work always needs a plan
+        "no_secrets_in_commits": True,    # G4 - prevent secret commits
+        "destructive_operations_require_approval": True,  # G5 - require explicit approval
+    }
+    rules_path = ROOT / ".ai" / "rules.yaml"
+    if not rules_path.exists():
+        return dict(defaults)
+    try:
+        text = rules_path.read_text(encoding="utf-8")
+    except Exception:
+        return dict(defaults)
+    result = dict(defaults)
+    for line in text.splitlines():
+        line = line.strip().lstrip("\ufeff")  # Strip BOM + whitespace
+        if not line or line.startswith("#"):
+            continue
+        match = re.match(r"^(\w[\w_]*):\s*(.+)$", line)
+        if match:
+            key = match.group(1)
+            value = match.group(2).strip()
+            if value.lower() in ("true", "yes", "on"):
+                result[key] = True
+            elif value.lower() in ("false", "no", "off"):
+                result[key] = False
+            else:
+                result[key] = value
+    return result
+
+
 # Legacy fallbacks used only if registry.yaml is absent
 ROLE_DOMAINS = {
     "backend": ["backend", "database", "ai"], "frontend": ["frontend"],
@@ -208,6 +249,58 @@ def validate(state: dict) -> None:
             seen.add(task_id)
     for task_id in tasks:
         visit(task_id)
+
+    # T2: Integrate rules.yaml gates into validation
+    # _load_rules() reads .ai/rules.yaml at runtime, so operators can toggle
+    # gates without modifying the engine. All rules default to True (safe) when
+    # the config file is missing, malformed, or unreadable.
+    rules = _load_rules()
+
+    # G1 - Plan: configurable via rules.yaml `planning_first` key
+    # When planning_first is true, tasks past "todo" in non-plan phases
+    # must have all their plan-phase dependencies completed first.
+    # Set `planning_first: false` in .ai/rules.yaml to skip this check.
+    if rules.get("planning_first", True):
+        for task in state["tasks"]:
+            past_todo = task["status"] not in {"todo", "blocked"}
+            if past_todo and task["phase"] != "plan":
+                plan_deps = [dep for dep in task["needs"] if tasks[dep].get("phase") == "plan"]
+                if plan_deps and not all(tasks[dep]["status"] == "done" for dep in plan_deps):
+                    offender = next(dep for dep in plan_deps if tasks[dep]["status"] != "done")
+                    raise EngineError(
+                        f"G1 planning_first: task {task['id']} ({task['status']}) "
+                        f"needs plan dependency {offender} ({tasks[offender]['status']}) completed"
+                    )
+
+    # G3 - Review: configurable via rules.yaml `review_required` key
+    # When review_required is true, tasks at "done" must carry review evidence
+    # proving they passed through review-approve. The evidence file is validated
+    # by _parse_evidence_kind() which reads the `kind` field from the JSON payload.
+    # Set `review_required: false` in .ai/rules.yaml to skip this check.
+    if rules.get("review_required", True):
+        for task in state["tasks"]:
+            if task["status"] == "done":
+                has_review = any(
+                    _parse_evidence_kind(p) == "review" for p in (task.get("evidence") or [])
+                )
+                if not has_review:
+                    raise EngineError(
+                        f"G3 review_required: task {task['id']} is done but has no review evidence"
+                    )
+
+
+def _parse_evidence_kind(path: str) -> str | None:
+    """Extract the kind field from an evidence JSON file path. Returns None on failure."""
+    try:
+        evidence_path = Path(path)
+        if not evidence_path.is_absolute():
+            evidence_path = ROOT / evidence_path
+        if evidence_path.exists():
+            payload = json.loads(evidence_path.read_text(encoding="utf-8"))
+            return payload.get("kind")
+    except Exception:
+        return None
+    return None
 
 
 def sync_phases(state: dict) -> None:

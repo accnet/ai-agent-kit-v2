@@ -14,7 +14,7 @@ Standards for schema changes, migrations, and data access, independent of engine
 Any task owned by the Database agent, or any task that changes the database — schema OR data.
 
 ## Standards
-- **Plan first (mandatory)**: any database change (schema OR data: migration, DDL, bulk/data update, seed) requires a task in `.ai-work/tasks.md` (or a `.ai-work/`) before touching the DB — never the trivial fast path (rules.yaml: `db_changes_require_plan`, Gate G1)
+- **Plan first (mandatory)**: any database change (schema OR data: migration, DDL, bulk/data update, seed) requires a task in `.ai-work/tasks/tasks.md` before touching the DB — never the trivial fast path (rules.yaml: `db_changes_require_plan`, Gate G1)
 - **Migrations**: every change ships as up + down; down is tested, not decorative
 - **Integrity**: FK, unique, not-null, and checks live in the database; application checks are a second layer, not a substitute
 - **Naming**: follow the existing schema's conventions exactly (case, plurality, prefixes)

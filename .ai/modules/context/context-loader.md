@@ -12,9 +12,9 @@ Gather candidate context sources for the current task, cheaply, before any ranki
 
 ## Source Order
 1. `.ai-work/brief.md` — always
-2. `.ai-work/tasks.md` — current task + its criteria
+2. `.ai-work/tasks/tasks.md` — current task + its criteria
 3. `.ai-work/research/` + `context/*` — requirements and research (read-only)
-3b. `.ai-work/plan.md`, `architecture.md`, `decisions.md` — execution context
+3b. `.ai-work/plan/plan.md`, `architecture.md`, `decisions.md` — execution context
 4. Files named in the task; then their direct imports/dependents
 5. `.ai/memory/conventions.md` — project conventions
 
