@@ -10,7 +10,7 @@ $source = (Resolve-Path $PSScriptRoot).Path
 $targetPath = (Resolve-Path $Target).Path
 if ($source -eq $targetPath) { throw 'Target cannot be the kit directory.' }
 
-$items = @('AGENTS.md','CLAUDE.md','GEMINI.md','.ai','.claude','.cursor','.githooks','.windsurf','.github/copilot-instructions.md','.github/workflows/gates.yml')
+$items = @('AGENTS.md','CLAUDE.md','GEMINI.md','ANTIGRAVITY.md','.agents','.ai','.claude','.cursor','.githooks','.windsurf','.github/copilot-instructions.md','.github/workflows/gates.yml')
 $files = foreach ($item in $items) {
     $path = Join-Path $source $item
     if (Test-Path -LiteralPath $path -PathType Container) { Get-ChildItem -LiteralPath $path -Recurse -File }

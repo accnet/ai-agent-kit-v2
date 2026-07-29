@@ -31,6 +31,7 @@ thin entry points and must not duplicate or override these rules:
 - GitHub Copilot: `.github/copilot-instructions.md` directs Copilot here.
 - Cursor: `.cursor/rules/ai-kit.mdc` applies this file to every workspace task.
 - Gemini CLI: `GEMINI.md` directs Gemini here.
+- Antigravity: `ANTIGRAVITY.md` directs Antigravity here.
 - Claude Code: `CLAUDE.md` and `.claude/commands/` direct Claude here.
 - Windsurf: `.windsurf/rules/ai-kit.md` and `.windsurf/workflows/` direct
   Windsurf here.

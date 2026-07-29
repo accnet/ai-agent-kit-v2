@@ -23,7 +23,7 @@ done
 
 [[ "$TARGET" != "$SOURCE" ]] || { echo "Target cannot be the kit directory." >&2; exit 2; }
 
-PATHS=(AGENTS.md CLAUDE.md GEMINI.md .ai .claude .cursor .githooks .windsurf .github/copilot-instructions.md .github/workflows/gates.yml)
+PATHS=(AGENTS.md CLAUDE.md GEMINI.md ANTIGRAVITY.md .agents .ai .claude .cursor .githooks .windsurf .github/copilot-instructions.md .github/workflows/gates.yml)
 FILES=()
 for item in "${PATHS[@]}"; do
   source_path="$SOURCE/$item"

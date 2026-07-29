@@ -9,8 +9,8 @@ if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   git config core.hooksPath .githooks
 fi
 if [[ ! -f .ai-work/state/workflow.json ]]; then
-  python .ai/engine/ai_kit.py init --title "Untitled workflow" --workflow feature >/dev/null
+  python3 .ai/engine/ai_kit.py init --title "Untitled workflow" --workflow feature >/dev/null
 fi
 bash .ai/scripts/check-kit.sh
-python .ai/engine/ai_kit.py validate
+python3 .ai/engine/ai_kit.py validate
 echo "AI-Kit v2 bootstrapped. Create tasks with .ai/engine/ai_kit.py add-task."
