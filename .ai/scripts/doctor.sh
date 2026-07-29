@@ -23,7 +23,8 @@ else
 fi
 
 if [[ -f .ai-work/state/workflow.json ]]; then
-  python3 .ai/engine/ai_kit.py validate >/dev/null && ok "workflow state valid" || bad "workflow state invalid"
+  PYTHON_CMD=${PYTHON_CMD:-$(command -v python3 || command -v python)}
+  "$PYTHON_CMD" .ai/engine/ai_kit.py validate >/dev/null && ok "workflow state valid" || bad "workflow state invalid"
 else
   note "workflow state not initialized (run .ai/scripts/bootstrap.sh)"
 fi

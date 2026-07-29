@@ -1,4 +1,4 @@
-﻿kit:
+kit:
   id: ai-kit-v2
   version: 2.0.0
   entrypoint: AGENTS.md
@@ -12,6 +12,6 @@ project:
 
 verification:
   test_command: python -m unittest discover -s tests -v
-  typecheck_command:
-  build_command:
-  lint_command:
+  typecheck_command: true
+  build_command: true
+  lint_command: true

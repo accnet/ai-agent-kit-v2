@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 """Dependency-free control plane for AI-Kit v2 workflows."""
 from __future__ import annotations
 
@@ -370,6 +370,25 @@ def cmd_onboard(args: argparse.Namespace) -> dict:
     return proposal
 
 
+def cmd_approve(args: argparse.Namespace) -> dict:
+    state = load(state_path(args.state)); validate(state)
+    task = task_map(state).get(args.id)
+    if not task:
+        raise EngineError(f"unknown task: {args.id}")
+    action = "qa-pass" if args.role == "qa" else "review-approve"
+    status = args.status or ("pass" if args.role == "qa" else "approve")
+    verdict_key = "status" if args.role == "qa" else "verdict"
+    payload = {"kind": args.role, "task": task["id"], "ts": now(), verdict_key: status, "reason": args.reason}
+    root = workspace(state_path(args.state))
+    evidence_path = root / f"{args.role}_evidence_{task['id']}.json"
+    evidence_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    args.action = action
+    args.evidence = [evidence_path.as_posix()]
+    args.detail = args.reason
+    args.actor = args.role
+    return cmd_transition(args)
+
+
 def cmd_show(args: argparse.Namespace) -> dict:
     state = load(state_path(args.state)); validate(state); sync_phases(state)
     return state
@@ -385,6 +404,7 @@ def parser() -> argparse.ArgumentParser:
     ready = sub.add_parser("ready"); ready.set_defaults(fn=cmd_ready)
     plan = sub.add_parser("plan"); plan.add_argument("--idea", required=True); plan.add_argument("--workflow", default="feature"); plan.add_argument("--owner", required=True); plan.add_argument("--acceptance", nargs="+", required=True); plan.add_argument("--files", nargs="*"); plan.add_argument("--tags", nargs="*"); plan.add_argument("--phase", default="build"); plan.add_argument("--scope"); plan.add_argument("--out-of-scope"); plan.add_argument("--risks", nargs="*"); plan.add_argument("--assumptions"); plan.add_argument("--actor", default="planner"); plan.add_argument("--force", action="store_true"); plan.set_defaults(fn=cmd_plan)
     trans = sub.add_parser("transition"); trans.add_argument("id"); trans.add_argument("action", choices=TRANSITIONS); trans.add_argument("--actor", required=True); trans.add_argument("--detail"); trans.add_argument("--evidence", nargs="+"); trans.add_argument("--expected-revision", type=int); trans.set_defaults(fn=cmd_transition)
+    approve = sub.add_parser("approve"); approve.add_argument("id"); approve.add_argument("--role", choices=["qa", "review"], required=True); approve.add_argument("--status"); approve.add_argument("--reason", required=True); approve.set_defaults(fn=cmd_approve)
     route = sub.add_parser("route"); route.add_argument("id"); route.set_defaults(fn=cmd_route)
     status = sub.add_parser("status"); status.set_defaults(fn=cmd_status)
     timeline = sub.add_parser("timeline"); timeline.set_defaults(fn=cmd_timeline)
