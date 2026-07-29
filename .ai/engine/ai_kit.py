@@ -313,6 +313,22 @@ def sync_phases(state: dict) -> None:
     state["phases"] = phases
 
 
+def sync_tasks_md(state: dict, state_path: Path) -> None:
+    """Sync .ai-work/tasks/tasks.md with current workflow state."""
+    tasks_dir = workspace(state_path) / "tasks"
+    tasks_dir.mkdir(parents=True, exist_ok=True)
+    tasks_md = tasks_dir / "tasks.md"
+    lines = ["# Tasks", ""]
+    for task in state["tasks"]:
+        status_mark = "x" if task["status"] == "done" else " "
+        needs = f" | needs: {','.join(task['needs'])}" if task["needs"] else ""
+        lines.append(f"- [{status_mark}] {task['id']} {task['title']} | owner: {task['owner']}{needs} | phase: {task['phase']}")
+        for criterion in task["acceptance"]:
+            lines.append(f"  - Accept: {criterion}")
+        lines.append(f"  - Status: {task['status']}")
+    tasks_md.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
 def runnable(task: dict, tasks: dict) -> bool:
     return task["status"] == "todo" and all(tasks[dep]["status"] == "done" for dep in task["needs"])
 
@@ -373,6 +389,7 @@ def cmd_add_task(args: argparse.Namespace) -> dict:
     state["tasks"].append(task)
     validate(state)
     sync_phases(state)
+    sync_tasks_md(state, path)
     event(state, path, "add-task", task, args.actor, None, "todo", "task added")
     save(state, path, state["revision"])
     return task
@@ -409,7 +426,9 @@ def cmd_transition(args: argparse.Namespace) -> dict:
     if args.action == "start":
         task["attempts"] += 1
         task["claimed_by"] = args.actor
-    sync_phases(state); event(state, path, args.action, task, args.actor, old, target, args.detail or "")
+    sync_phases(state)
+    sync_tasks_md(state, path)
+    event(state, path, args.action, task, args.actor, old, target, args.detail or "")
     requested_revision = getattr(args, "expected_revision", None)
     expected = requested_revision if requested_revision is not None else state["revision"]
     save(state, path, expected)
