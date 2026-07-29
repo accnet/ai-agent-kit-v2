@@ -1,0 +1,33 @@
+{
+  "id": "feature",
+  "description": "Standard feature delivery workflow",
+  "phases": ["plan", "build", "verify", "release"],
+  "required_roles": {
+    "plan": ["planner"],
+    "build": ["backend", "frontend", "database", "devops"],
+    "verify": ["qa", "reviewer"],
+    "release": ["release"]
+  },
+  "gate_requirements": {
+    "qa-pass": {
+      "required_evidence": ["qa"],
+      "actor_must_differ_from": "claimed_by"
+    },
+    "review-approve": {
+      "required_evidence": ["review"],
+      "actor_must_differ_from": "claimed_by"
+    },
+    "close": {
+      "requires_status": "review-approved"
+    }
+  },
+  "allowed_transitions": {
+    "start": {"from": ["todo"], "to": "in-progress"},
+    "complete": {"from": ["in-progress"], "to": "implementation-complete"},
+    "qa-pass": {"from": ["implementation-complete"], "to": "qa-passed"},
+    "review-approve": {"from": ["qa-passed"], "to": "review-approved"},
+    "close": {"from": ["review-approved"], "to": "done"},
+    "block": {"from": ["todo", "in-progress", "implementation-complete", "qa-passed", "review-approved"], "to": "blocked"},
+    "unblock": {"from": ["blocked"], "to": "todo"}
+  }
+}

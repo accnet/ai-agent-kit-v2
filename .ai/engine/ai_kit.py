@@ -16,6 +16,35 @@ WORK = ROOT / ".ai-work"
 STATE = WORK / "state" / "workflow.json"
 CURRENT = WORK / "state" / "current.json"
 EVENT_LOG = WORK / "logs" / "events.jsonl"
+def _load_registry() -> dict:
+    """Load role→domain and role→core-skill mappings from registry.yaml."""
+    registry_path = ROOT / ".ai" / "registry.yaml"
+    if not registry_path.exists():
+        return {"owners": {}, "core_skills": {"names": []}}
+    text = registry_path.read_text(encoding="utf-8")
+    # Lightweight YAML parsing for owners and core_skills (no pyyaml dep)
+    owners: dict[str, list[str]] = {}
+    in_owners = False
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("owners:"):
+            in_owners = True; continue
+        if in_owners:
+            if not line.startswith(" ") and not line.startswith("\t"):
+                in_owners = False; continue
+            match = re.match(r"\s+(\w+):\s*\[([^\]]*)\]", line)
+            if match:
+                role = match.group(1)
+                domains = [d.strip() for d in match.group(2).split(",") if d.strip()]
+                owners[role] = domains
+    core_names: list[str] = []
+    match = re.search(r"names:\s*\[([^\]]*)\]", text)
+    if match:
+        core_names = [n.strip() for n in match.group(1).split(",") if n.strip()]
+    return {"owners": owners, "core_skills": {"names": core_names}}
+
+
+# Legacy fallbacks used only if registry.yaml is absent
 ROLE_DOMAINS = {
     "backend": ["backend", "database", "ai"], "frontend": ["frontend"],
     "database": ["database"], "devops": ["devops"], "release": ["devops"], "qa": ["testing"],
@@ -318,7 +347,8 @@ def cmd_route(args: argparse.Namespace) -> dict:
     if not task:
         raise EngineError(f"unknown task: {args.id}")
     role = task["owner"]
-    domains = ROLE_DOMAINS.get(role, [])
+    registry = _load_registry()
+    domains = registry["owners"].get(role, ROLE_DOMAINS.get(role, []))
     skill_root = ROOT / ".ai" / "skills"
     skills = []
     stack = configured_stack() | set(task.get("tags", []))
@@ -402,6 +432,7 @@ def cmd_approve(args: argparse.Namespace) -> dict:
 
 
 def cmd_dispatch(args: argparse.Namespace) -> dict:
+    import subprocess as _sp
     state = load(state_path(args.state)); validate(state)
     task = task_map(state).get(args.id)
     if not task:
@@ -414,9 +445,14 @@ def cmd_dispatch(args: argparse.Namespace) -> dict:
     prompt = f"Bạn là {task['owner']}. Thực thi task {task['id']} theo yêu cầu trong .ai-work/tasks/tasks.md. Không vi phạm AGENTS.md. Xong việc gọi lệnh: bash .ai/scripts/ai-kit transition {task['id']} complete --actor {task['owner']} --detail 'Hoàn thành bởi {args.runner}'"
     cmd = template.replace("{prompt}", prompt.replace("'", "'\\''"))
     print(f"Dispatching task {task['id']} to runner '{args.runner}'...", file=sys.stderr)
-    res = os.system(cmd)
-    if res != 0:
-        raise EngineError(f"Runner {args.runner} exited with code {res}")
+    result = _sp.run(cmd, shell=True, cwd=str(ROOT))
+    # Audit log
+    audit = {"ts": now(), "task": task["id"], "runner": args.runner, "command": cmd, "exit_code": result.returncode}
+    audit_path = workspace(state_path(args.state)) / f"dispatch_log_{task['id']}.json"
+    audit_path.parent.mkdir(parents=True, exist_ok=True)
+    audit_path.write_text(json.dumps(audit, indent=2) + "\n", encoding="utf-8")
+    if result.returncode != 0:
+        raise EngineError(f"Runner {args.runner} exited with code {result.returncode}")
     return {"task": task["id"], "runner": args.runner, "status": "dispatched"}
 
 
