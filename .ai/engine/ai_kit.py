@@ -389,6 +389,60 @@ def cmd_approve(args: argparse.Namespace) -> dict:
     return cmd_transition(args)
 
 
+def cmd_dispatch(args: argparse.Namespace) -> dict:
+    state = load(state_path(args.state)); validate(state)
+    task = task_map(state).get(args.id)
+    if not task:
+        raise EngineError(f"unknown task: {args.id}")
+    runners_file = ROOT / ".ai" / "runners.json"
+    runners = json.loads(runners_file.read_text(encoding="utf-8")) if runners_file.exists() else {}
+    if args.runner not in runners:
+        raise EngineError(f"unknown runner profile: {args.runner}. Available: {', '.join(runners.keys())}")
+    template = runners[args.runner]
+    prompt = f"Bạn là {task['owner']}. Thực thi task {task['id']} theo yêu cầu trong .ai-work/tasks/tasks.md. Không vi phạm AGENTS.md. Xong việc gọi lệnh: bash .ai/scripts/ai-kit transition {task['id']} complete --actor {task['owner']} --detail 'Hoàn thành bởi {args.runner}'"
+    cmd = template.replace("{prompt}", prompt.replace("'", "'\\''"))
+    print(f"Dispatching task {task['id']} to runner '{args.runner}'...", file=sys.stderr)
+    res = os.system(cmd)
+    if res != 0:
+        raise EngineError(f"Runner {args.runner} exited with code {res}")
+    return {"task": task["id"], "runner": args.runner, "status": "dispatched"}
+
+
+def cmd_verify(args: argparse.Namespace) -> dict:
+    state = load(state_path(args.state)); validate(state)
+    task = task_map(state).get(args.id)
+    if not task:
+        raise EngineError(f"unknown task: {args.id}")
+    
+    print(f"Verifying task {task['id']}...", file=sys.stderr)
+    
+    manifest = ROOT / ".ai" / "kit.yaml"
+    if manifest.exists():
+        text = manifest.read_text(encoding="utf-8")
+        import re
+        match = re.search(r"test_command:\s*(.+)", text)
+        if match:
+            cmd = match.group(1).strip()
+            if cmd != "true":
+                print(f"Running tests: {cmd}", file=sys.stderr)
+                res = os.system(cmd)
+                if res != 0:
+                    raise EngineError(f"Tests failed (exit code {res})")
+                    
+    gates = ROOT / ".ai" / "scripts" / "check-gates.sh"
+    if gates.exists():
+        print("Checking security gates (G4)...", file=sys.stderr)
+        res = os.system(f"bash {gates} all")
+        if res != 0:
+            raise EngineError(f"Security gates failed (exit code {res})")
+            
+    print("Verification passed! Automatically approving task as QA...", file=sys.stderr)
+    args.role = "qa"
+    args.status = "pass"
+    args.reason = "Automated verification passed successfully"
+    return cmd_approve(args)
+
+
 def cmd_show(args: argparse.Namespace) -> dict:
     state = load(state_path(args.state)); validate(state); sync_phases(state)
     return state
@@ -405,6 +459,8 @@ def parser() -> argparse.ArgumentParser:
     plan = sub.add_parser("plan"); plan.add_argument("--idea", required=True); plan.add_argument("--workflow", default="feature"); plan.add_argument("--owner", required=True); plan.add_argument("--acceptance", nargs="+", required=True); plan.add_argument("--files", nargs="*"); plan.add_argument("--tags", nargs="*"); plan.add_argument("--phase", default="build"); plan.add_argument("--scope"); plan.add_argument("--out-of-scope"); plan.add_argument("--risks", nargs="*"); plan.add_argument("--assumptions"); plan.add_argument("--actor", default="planner"); plan.add_argument("--force", action="store_true"); plan.set_defaults(fn=cmd_plan)
     trans = sub.add_parser("transition"); trans.add_argument("id"); trans.add_argument("action", choices=TRANSITIONS); trans.add_argument("--actor", required=True); trans.add_argument("--detail"); trans.add_argument("--evidence", nargs="+"); trans.add_argument("--expected-revision", type=int); trans.set_defaults(fn=cmd_transition)
     approve = sub.add_parser("approve"); approve.add_argument("id"); approve.add_argument("--role", choices=["qa", "review"], required=True); approve.add_argument("--status"); approve.add_argument("--reason", required=True); approve.set_defaults(fn=cmd_approve)
+    verify = sub.add_parser("verify"); verify.add_argument("id"); verify.set_defaults(fn=cmd_verify)
+    dispatch = sub.add_parser("dispatch"); dispatch.add_argument("id"); dispatch.add_argument("--runner", required=True); dispatch.set_defaults(fn=cmd_dispatch)
     route = sub.add_parser("route"); route.add_argument("id"); route.set_defaults(fn=cmd_route)
     status = sub.add_parser("status"); status.set_defaults(fn=cmd_status)
     timeline = sub.add_parser("timeline"); timeline.set_defaults(fn=cmd_timeline)
