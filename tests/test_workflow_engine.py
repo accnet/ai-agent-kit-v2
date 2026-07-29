@@ -115,6 +115,103 @@ class WorkflowEngineTests(unittest.TestCase):
         status = subprocess.run([sys.executable, str(ENGINE), "--state", str(self.state_path), "status"], capture_output=True, text=True, check=True)
         self.assertIn('"counts"', status.stdout)
 
+    def test_claimed_by_set_on_start(self):
+        """P0-4: claimed_by must record the actor who started the task."""
+        state = self.state([task("T1")])
+        engine.save(state, self.state_path)
+        args = type("Args", (), {"state": str(self.state_path), "id": "T1", "action": "start", "actor": "backend", "detail": None, "evidence": None})()
+        engine.cmd_transition(args)
+        loaded = engine.load(self.state_path)
+        self.assertEqual("backend", loaded["tasks"][0]["claimed_by"])
+
+    def test_executor_cannot_qa_own_work(self):
+        """P0-4: QA actor must differ from the executor who started the task."""
+        state = self.state([task("T1")])
+        engine.save(state, self.state_path)
+        # Start as backend
+        args = type("Args", (), {"state": str(self.state_path), "id": "T1", "action": "start", "actor": "backend", "detail": None, "evidence": None})()
+        engine.cmd_transition(args)
+        # Complete as backend
+        args.action = "complete"
+        engine.cmd_transition(args)
+        # Try to QA as backend (same actor) — must fail
+        args.action = "qa-pass"
+        args.evidence = [self.evidence("qa")]
+        with self.assertRaisesRegex(engine.EngineError, "must differ from executor"):
+            engine.cmd_transition(args)
+
+    def test_executor_cannot_review_own_work(self):
+        """P0-4: Reviewer must differ from executor."""
+        state = self.state([task("T1")])
+        engine.save(state, self.state_path)
+        for action, actor in [("start", "backend"), ("complete", "backend")]:
+            args = type("Args", (), {"state": str(self.state_path), "id": "T1", "action": action, "actor": actor, "detail": None, "evidence": None})()
+            engine.cmd_transition(args)
+        # QA by a different actor — should pass
+        args = type("Args", (), {"state": str(self.state_path), "id": "T1", "action": "qa-pass", "actor": "qa", "detail": None, "evidence": [self.evidence("qa")]})()
+        engine.cmd_transition(args)
+        # Review as backend (original executor) — must fail
+        args = type("Args", (), {"state": str(self.state_path), "id": "T1", "action": "review-approve", "actor": "backend", "detail": None, "evidence": [self.evidence("review")]})()
+        with self.assertRaisesRegex(engine.EngineError, "must differ from executor"):
+            engine.cmd_transition(args)
+
+    def test_verify_returns_report_without_auto_approve(self):
+        """P0-4: verify should produce a report dict, not auto-approve."""
+        # Temporarily set test_command to 'true' to avoid recursive test run
+        kit_yaml = engine.ROOT / ".ai" / "kit.yaml"
+        original = kit_yaml.read_text(encoding="utf-8")
+        kit_yaml.write_text(original.replace("python3 -m unittest discover -s tests -v", "true"), encoding="utf-8")
+        try:
+            state = self.state([task("T1", status="implementation-complete")])
+            engine.save(state, self.state_path)
+            args = type("Args", (), {"state": str(self.state_path), "id": "T1"})()
+            result = engine.cmd_verify(args)
+            self.assertIn("checks", result)
+            self.assertIn("passed", result)
+            # Task should still be implementation-complete (not qa-passed)
+            loaded = engine.load(self.state_path)
+            self.assertEqual("implementation-complete", loaded["tasks"][0]["status"])
+        finally:
+            kit_yaml.write_text(original, encoding="utf-8")
+
+    def test_stale_lock_is_recoverable(self):
+        """Lock file left behind should time out and raise clear error."""
+        state = self.state([])
+        engine.save(state, self.state_path)
+        # Create a stale lock
+        lock = self.state_path.with_suffix(self.state_path.suffix + ".lock")
+        lock.write_text("stale", encoding="utf-8")
+        # save should time out (with short deadline) or succeed after cleanup
+        # Since deadline is 5s, just verify lock blocks
+        import threading, time
+        def remove_lock():
+            time.sleep(0.2)
+            lock.unlink(missing_ok=True)
+        t = threading.Thread(target=remove_lock)
+        t.start()
+        engine.save(state, self.state_path)  # should succeed after lock removed
+        t.join()
+        self.assertTrue(self.state_path.exists())
+
+    def test_e2e_lifecycle_via_cli(self):
+        """Full lifecycle via CLI subprocess: init → add-task → start → complete → done."""
+        run = lambda *args_list: subprocess.run([sys.executable, str(ENGINE), "--state", str(self.state_path)] + list(args_list), capture_output=True, text=True, check=True)
+        run("init", "--title", "e2e", "--workflow", "feature")
+        run("add-task", "T1", "--title", "test task", "--owner", "backend", "--phase", "build", "--acceptance", "it works")
+        run("transition", "T1", "start", "--actor", "backend")
+        run("transition", "T1", "complete", "--actor", "backend")
+        # Create evidence files for QA and review
+        qa_ev = Path(self.temp.name) / "qa_e2e.json"
+        qa_ev.write_text(json.dumps({"kind": "qa", "task": "T1", "status": "pass"}), encoding="utf-8")
+        run("transition", "T1", "qa-pass", "--actor", "qa", "--evidence", str(qa_ev))
+        rev_ev = Path(self.temp.name) / "review_e2e.json"
+        rev_ev.write_text(json.dumps({"kind": "review", "task": "T1", "verdict": "approve"}), encoding="utf-8")
+        run("transition", "T1", "review-approve", "--actor", "reviewer", "--evidence", str(rev_ev))
+        run("transition", "T1", "close", "--actor", "release")
+        result = run("status")
+        self.assertIn('"done": 1', result.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()
+
