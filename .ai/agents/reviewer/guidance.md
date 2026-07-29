@@ -19,7 +19,7 @@ Review completed work for correctness, security, and consistency before it is ac
 
 ## Inputs
 - Diff / changed files for the current task
-- `.ai-work/tasks.md` acceptance criteria
+- `.ai-work/tasks/tasks.md` acceptance criteria
 - Architect's contracts and the project's conventions
 
 ## Outputs

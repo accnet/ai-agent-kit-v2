@@ -17,7 +17,7 @@ Implement user interfaces and client-side logic against the defined API contract
 - May NOT change API contracts; consume them as defined
 
 ## Inputs
-- Current task from `.ai-work/tasks.md`
+- Current task from `.ai-work/tasks/tasks.md`
 - API contracts from Architect/Backend
 - Existing components, design tokens, and conventions
 

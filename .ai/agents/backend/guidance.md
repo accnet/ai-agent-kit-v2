@@ -17,7 +17,7 @@ Implement server-side logic, APIs, and integrations according to the approved de
 - May NOT change public contracts or DB schema without Architect/Database sign-off
 
 ## Inputs
-- Current task from `.ai-work/tasks.md`
+- Current task from `.ai-work/tasks/tasks.md`
 - Architect's contracts and the project's stack conventions
 - Existing source code and conventions
 

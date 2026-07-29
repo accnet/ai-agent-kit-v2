@@ -1,5 +1,5 @@
 {
-  "version": 1,
+  "version": 2,
   "revision": 0,
   "title": "Example feature",
   "workflow": "feature",
@@ -17,7 +17,8 @@
       "tags": [],
       "attempts": 0,
       "evidence": [],
-      "blocked_reason": null
+      "blocked_reason": null,
+      "claimed_by": null
     },
     {
       "id": "T2",
@@ -31,7 +32,8 @@
       "tags": [],
       "attempts": 0,
       "evidence": [],
-      "blocked_reason": null
+      "blocked_reason": null,
+      "claimed_by": null
     }
   ],
   "phases": [],

@@ -1,9 +1,11 @@
-﻿# Workflow State Schema
+# Workflow State Schema
 
 `workflow.json` contains `version`, `title`, `workflow`, `tasks`, `phases`,
 and `events`. A task has `id`, `title`, `owner`, `phase`, `needs`, `status`,
-`acceptance`, `files`, `attempts`, and `blocked_reason`. Phase state is derived:
-`planned`, `open`, or `complete`.
+`acceptance`, `files`, `tags`, `attempts`, `evidence`, `blocked_reason`, and
+`claimed_by`. Phase state is derived: `planned`, `open`, or `complete`.
+`claimed_by` records the actor who started the task; QA and review actors
+must differ from `claimed_by` to enforce independent verification.
 
 Legal task statuses are `todo`, `in-progress`, `implementation-complete`,
 `qa-passed`, `review-approved`, `done`, and `blocked`.

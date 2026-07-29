@@ -15,7 +15,7 @@ SPEC.loader.exec_module(engine)
 
 
 def task(task_id, needs=None, status="todo"):
-    return {"id": task_id, "title": task_id, "owner": "backend", "phase": "build", "needs": needs or [], "status": status, "acceptance": ["works"], "files": [], "tags": [], "attempts": 0, "evidence": [], "blocked_reason": None}
+    return {"id": task_id, "title": task_id, "owner": "backend", "phase": "build", "needs": needs or [], "status": status, "acceptance": ["works"], "files": [], "tags": [], "attempts": 0, "evidence": [], "blocked_reason": None, "claimed_by": None}
 
 
 class WorkflowEngineTests(unittest.TestCase):

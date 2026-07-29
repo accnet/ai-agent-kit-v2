@@ -82,7 +82,7 @@ def workflow_names() -> set[str]:
 
 
 def new_state(title: str, workflow: str) -> dict:
-    return {"version": 1, "revision": 0, "title": title, "workflow": workflow, "created_at": now(), "tasks": [], "phases": [], "events": []}
+    return {"version": 2, "revision": 0, "title": title, "workflow": workflow, "created_at": now(), "tasks": [], "phases": [], "events": []}
 
 
 def configured_stack() -> set[str]:
@@ -138,6 +138,13 @@ def task_map(state: dict) -> dict:
 def validate(state: dict) -> None:
     required = {"version", "revision", "title", "workflow", "tasks", "phases", "events"}
     missing = required - set(state)
+    if missing:
+        raise EngineError(f"state missing keys: {', '.join(sorted(missing))}")
+    # Migrate v1 tasks that lack claimed_by
+    for task in state.get("tasks", []):
+        if "claimed_by" not in task:
+            task["claimed_by"] = None
+    missing = set()  # reset after migration
     if missing:
         raise EngineError(f"state missing keys: {', '.join(sorted(missing))}")
     tasks = task_map(state)
@@ -240,7 +247,7 @@ def cmd_add_task(args: argparse.Namespace) -> dict:
         raise EngineError(f"task already exists: {args.id}")
     if not args.acceptance:
         raise EngineError("add-task requires at least one --acceptance criterion")
-    task = {"id": args.id, "title": args.title, "owner": args.owner, "phase": args.phase, "needs": args.needs or [], "status": "todo", "acceptance": args.acceptance, "files": args.files or [], "tags": args.tags or [], "attempts": 0, "evidence": [], "blocked_reason": None}
+    task = {"id": args.id, "title": args.title, "owner": args.owner, "phase": args.phase, "needs": args.needs or [], "status": "todo", "acceptance": args.acceptance, "files": args.files or [], "tags": args.tags or [], "attempts": 0, "evidence": [], "blocked_reason": None, "claimed_by": None}
     state["tasks"].append(task)
     validate(state)
     sync_phases(state)
@@ -270,11 +277,16 @@ def cmd_transition(args: argparse.Namespace) -> dict:
         if not args.evidence:
             raise EngineError(f"{args.action} requires at least one --evidence path")
         validate_evidence(task, args.action, args.evidence)
+        # P0-4: Executor must not QA/review their own work
+        if task.get("claimed_by") and args.actor == task["claimed_by"]:
+            raise EngineError(f"{args.action} actor '{args.actor}' must differ from executor '{task['claimed_by']}'")
     old = task["status"]; task["status"] = target
     task["blocked_reason"] = args.detail if target == "blocked" else None
     if args.evidence:
         task["evidence"].extend(args.evidence)
-    task["attempts"] += 1 if args.action == "start" else 0
+    if args.action == "start":
+        task["attempts"] += 1
+        task["claimed_by"] = args.actor
     sync_phases(state); event(state, path, args.action, task, args.actor, old, target, args.detail or "")
     requested_revision = getattr(args, "expected_revision", None)
     expected = requested_revision if requested_revision is not None else state["revision"]
@@ -287,8 +299,8 @@ def cmd_plan(args: argparse.Namespace) -> dict:
     if path.exists() and not args.force:
         raise EngineError(f"state already exists: {path}; use --force to replace")
     state = new_state(args.idea, args.workflow)
-    plan_task = {"id": "T1", "title": "Confirm scope and plan: " + args.idea, "owner": "planner", "phase": "plan", "needs": [], "status": "todo", "acceptance": ["Scope, exclusions, risks, and acceptance criteria confirmed"], "files": [".ai-work/roadmap/roadmap.md", ".ai-work/plan/plan.md", ".ai-work/tasks/tasks.md"], "tags": ["planning"], "attempts": 0, "evidence": [], "blocked_reason": None}
-    build_task = {"id": "T2", "title": args.idea, "owner": args.owner, "phase": args.phase, "needs": ["T1"], "status": "todo", "acceptance": args.acceptance, "files": args.files or [], "tags": args.tags or [], "attempts": 0, "evidence": [], "blocked_reason": None}
+    plan_task = {"id": "T1", "title": "Confirm scope and plan: " + args.idea, "owner": "planner", "phase": "plan", "needs": [], "status": "todo", "acceptance": ["Scope, exclusions, risks, and acceptance criteria confirmed"], "files": [".ai-work/roadmap/roadmap.md", ".ai-work/plan/plan.md", ".ai-work/tasks/tasks.md"], "tags": ["planning"], "attempts": 0, "evidence": [], "blocked_reason": None, "claimed_by": None}
+    build_task = {"id": "T2", "title": args.idea, "owner": args.owner, "phase": args.phase, "needs": ["T1"], "status": "todo", "acceptance": args.acceptance, "files": args.files or [], "tags": args.tags or [], "attempts": 0, "evidence": [], "blocked_reason": None, "claimed_by": None}
     state["tasks"] = [plan_task, build_task]; validate(state); sync_phases(state)
     root = workspace(path)
     root.joinpath("roadmap").mkdir(parents=True, exist_ok=True); root.joinpath("plan").mkdir(parents=True, exist_ok=True); root.joinpath("tasks").mkdir(parents=True, exist_ok=True)
@@ -409,38 +421,43 @@ def cmd_dispatch(args: argparse.Namespace) -> dict:
 
 
 def cmd_verify(args: argparse.Namespace) -> dict:
+    """Run verification checks and produce a report. Does NOT auto-approve."""
+    import subprocess as _sp
     state = load(state_path(args.state)); validate(state)
     task = task_map(state).get(args.id)
     if not task:
         raise EngineError(f"unknown task: {args.id}")
-    
+    report = {"task": task["id"], "checks": [], "passed": True}
     print(f"Verifying task {task['id']}...", file=sys.stderr)
-    
     manifest = ROOT / ".ai" / "kit.yaml"
     if manifest.exists():
         text = manifest.read_text(encoding="utf-8")
-        import re
-        match = re.search(r"test_command:\s*(.+)", text)
-        if match:
-            cmd = match.group(1).strip()
-            if cmd != "true":
-                print(f"Running tests: {cmd}", file=sys.stderr)
-                res = os.system(cmd)
-                if res != 0:
-                    raise EngineError(f"Tests failed (exit code {res})")
-                    
+        for key in ("test_command", "lint_command", "typecheck_command", "build_command"):
+            match = re.search(rf"{key}:\s*(.+)", text)
+            if match:
+                cmd = match.group(1).strip()
+                if cmd == "true":
+                    report["checks"].append({"name": key, "status": "skipped"})
+                    continue
+                print(f"  Running {key}: {cmd}", file=sys.stderr)
+                result = _sp.run(cmd, shell=True, cwd=str(ROOT), capture_output=True, text=True)
+                check = {"name": key, "command": cmd, "exit_code": result.returncode, "status": "pass" if result.returncode == 0 else "fail"}
+                if result.returncode != 0:
+                    check["stderr"] = result.stderr[-500:] if result.stderr else ""
+                    report["passed"] = False
+                report["checks"].append(check)
     gates = ROOT / ".ai" / "scripts" / "check-gates.sh"
     if gates.exists():
-        print("Checking security gates (G4)...", file=sys.stderr)
-        res = os.system(f"bash {gates} all")
-        if res != 0:
-            raise EngineError(f"Security gates failed (exit code {res})")
-            
-    print("Verification passed! Automatically approving task as QA...", file=sys.stderr)
-    args.role = "qa"
-    args.status = "pass"
-    args.reason = "Automated verification passed successfully"
-    return cmd_approve(args)
+        print("  Running security gates (G4)...", file=sys.stderr)
+        result = _sp.run(["bash", str(gates), "all"], cwd=str(ROOT), capture_output=True, text=True)
+        check = {"name": "security-gates", "exit_code": result.returncode, "status": "pass" if result.returncode == 0 else "fail"}
+        if result.returncode != 0:
+            check["stderr"] = result.stderr[-500:] if result.stderr else ""
+            report["passed"] = False
+        report["checks"].append(check)
+    verdict = "PASS" if report["passed"] else "FAIL"
+    print(f"Verification {verdict}. Use 'ai-kit approve {task['id']} --role qa' to finalize.", file=sys.stderr)
+    return report
 
 
 def cmd_show(args: argparse.Namespace) -> dict:

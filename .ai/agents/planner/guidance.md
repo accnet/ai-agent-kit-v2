@@ -10,7 +10,7 @@ Convert a feature brief into an executable, ordered task plan.
 - Break work into small, verifiable tasks with acceptance criteria
 - Order tasks by dependency; flag parallelizable work
 - Estimate scope (S/M/L) per task
-- Maintain `.ai-work/tasks.md`
+- Maintain `.ai-work/tasks/tasks.md`
 
 ## Capabilities
 - Load: modules/planning/*, templates/tasks.md, templates/feature-brief.md
@@ -24,7 +24,7 @@ Convert a feature brief into an executable, ordered task plan.
 
 ## Outputs
 - `.ai-work/plan.md` — goal, approach, risks (templates/plan.md)
-- `.ai-work/tasks.md` — ordered task list with acceptance criteria
+- `.ai-work/tasks/tasks.md` — ordered task list with acceptance criteria
 - Open questions list (if brief is ambiguous)
 - May NOT write to `features/` — requirements gaps go back to user/Researcher
 

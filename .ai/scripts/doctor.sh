@@ -16,6 +16,13 @@ for file in AGENTS.md README.md .ai/kit.yaml .ai/rules.yaml .ai/registry.yaml \
   [[ -f "$file" ]] && ok "$file" || bad "$file missing"
 done
 
+PYTHON_CMD=${PYTHON_CMD:-$(command -v python3 2>/dev/null || command -v python 2>/dev/null || true)}
+if [[ -n "$PYTHON_CMD" ]]; then
+  ok "python found: $PYTHON_CMD"
+else
+  bad "python3 (or python) not found in PATH"
+fi
+
 if bash .ai/scripts/check-kit.sh; then
   ok "v2 contracts valid"
 else

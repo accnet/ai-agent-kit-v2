@@ -18,7 +18,7 @@ Own data modeling, migrations, queries, and data integrity.
 
 ## Inputs
 - Architect's data model and contracts
-- Current task from `.ai-work/tasks.md`
+- Current task from `.ai-work/tasks/tasks.md`
 - Existing schema and migration history
 
 ## Outputs

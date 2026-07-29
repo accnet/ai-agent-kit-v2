@@ -1,7 +1,5 @@
-.ai-work/state/
-.ai-work/logs/
-.ai-work/snapshots/
-.ai-work/**/*.lock
-.ai-work/**/*.tmp
+# AI-Kit v2: disposable work state (G4 gate forbids committing these)
+.ai-work/
+
 __pycache__/
 *.py[cod]
