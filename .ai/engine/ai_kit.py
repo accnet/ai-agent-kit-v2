@@ -1147,7 +1147,9 @@ def cmd_dispatch(args: argparse.Namespace) -> dict:
         task = _retry_transition(start_args)
     elif task["status"] != "in-progress":
         raise EngineError(f"cannot dispatch {task['id']} from status {task['status']} (must be todo or in-progress)")
-    prompt = f"Bạn là {task['owner']}. Thực thi task {task['id']} theo yêu cầu trong .ai-work/tasks/tasks.md. Không vi phạm AGENTS.md. Xong việc gọi lệnh: bash .ai/scripts/ai-kit transition {task['id']} complete --actor {task['owner']} --detail 'Hoàn thành bởi {runner_name}'"
+    tasks_md = display_path(workspace(state_path(args.state)) / "tasks" / "tasks.md")
+    state_flag = f" --state {args.state}" if args.state else ""
+    prompt = f"Bạn là {task['owner']}. Thực thi task {task['id']} theo yêu cầu trong {tasks_md}. Không vi phạm AGENTS.md. Xong việc gọi lệnh: bash .ai/scripts/ai-kit{state_flag} transition {task['id']} complete --actor {task['owner']} --detail 'Hoàn thành bởi {runner_name}'"
     # Runner templates hold {prompt} unquoted; shlex.quote is the single
     # place quoting happens, so a template can never double-quote it.
     cmd = template.replace("{prompt}", shlex.quote(prompt))

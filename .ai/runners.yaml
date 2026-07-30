@@ -1,4 +1,4 @@
-default_executor: "codex-5.6"
+default_executor: "codex-5.6-luna"
 
 runners:
   claude:
@@ -8,43 +8,18 @@ runners:
   cline-pass:
     command: "cline -P cline-pass -m 'cline-pass/glm-5.2' --auto-approve true {prompt}"
     model: "glm-5.2"
-    provider: "cline"
+    provider: "cline-pass"
     description: "Cline pass runner"
   codex-5.5:
     command: "echo '' | codex exec -m 5.5 {prompt}"
     model: "5.5"
     provider: "codex-cli"
     description: "Codex 5.5 runner"
-  codex-5.6:
-    command: "echo '' | codex exec -m 5.6 {prompt}"
-    model: "5.6"
-    provider: "codex-cli"
-    description: "Codex 5.6 runner"
   codex-5.6-luna:
     command: "echo '' | codex exec -m gpt-5.6-luna {prompt}"
     model: "gpt-5.6-luna"
     provider: "codex-cli"
     description: "Codex Luna runner"
-  codex-auto:
-    command: "echo '' | codex exec -m gpt-5.6-luna {prompt}"
-    model: "gpt-5.6-luna"
-    provider: "codex-cli"
-    description: "Codex automatic runner"
-  codex-haiku:
-    command: "echo '' | codex exec -m haiku {prompt}"
-    model: "haiku"
-    provider: "codex-cli"
-    description: "Codex Haiku runner"
-  codex-opus:
-    command: "echo '' | codex exec -m opus {prompt}"
-    model: "opus"
-    provider: "codex-cli"
-    description: "Codex Opus runner"
-  codex-sonnet:
-    command: "echo '' | codex exec -m sonnet {prompt}"
-    model: "sonnet"
-    provider: "codex-cli"
-    description: "Codex Sonnet runner"
   deepseek-v4-flash:
     command: "cline -P deepseek -m 'deepseek-v4-flash' --auto-approve true {prompt}"
     model: "deepseek-v4-flash"
@@ -55,3 +30,13 @@ runners:
     model: "deepseek-v4-pro"
     provider: "cline"
     description: "DeepSeek V4 Pro runner"
+  opencode-deepseek-v4-flash:
+    command: "opencode run {prompt} --model deepseek/deepseek-v4-flash"
+    model: "deepseek-v4-flash"
+    provider: "opencode-cli"
+    description: "OpenCode CLI runner with DeepSeek V4 Flash model"
+  opencode-deepseek-v4-pro:
+    command: "opencode run {prompt} --model deepseek/deepseek-v4-pro"
+    model: "deepseek-v4-pro"
+    provider: "opencode-cli"
+    description: "OpenCode CLI runner with DeepSeek V4 Pro model"

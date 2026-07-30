@@ -168,3 +168,13 @@ X` that names a different runner is an `EngineError` raised before claiming
 any task, pointing at explicit `dispatch` as the alternative. A missing or
 misconfigured `default_executor` (unset, or naming a runner that isn't
 registered) also fails before claiming any task.
+
+`dispatch`'s prompt to the runner references the tasks file and instructs
+the completion command using the *resolved* workspace for the `--state`
+this dispatch call used (`workspace(state_path(args.state))`), not a
+hardcoded `.ai-work/tasks/tasks.md`. When `--state` is a custom path, the
+instructed `transition ... complete` command also includes that `--state
+<path>`; the default (unset) `--state` case omits it, keeping the prompt
+unchanged from before. Without this, a runner dispatched against a custom
+`--state` would read and transition tasks in the real default state
+instead.

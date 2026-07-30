@@ -87,6 +87,16 @@
 
 ### Fixed
 
+- `dispatch`: the prompt sent to the runner hardcoded `.ai-work/tasks/tasks.md`
+  and instructed the completion command with no `--state` flag, regardless of
+  what `--state` the dispatch call itself used. A dispatch against a custom
+  `--state` therefore misdirected the spawned agent at the real repo's
+  default `.ai-work` state instead of the intended custom one — reproduced
+  live via `opencode-deepseek`, where the spawned agent read and attempted to
+  transition a task in the real default state. Now the prompt's `tasks.md`
+  reference and the instructed `transition ... complete` command both use the
+  resolved workspace for `args.state` (`--state <path>` is included whenever
+  it's set); the default (unset) `--state` case is unchanged.
 - `dispatch-ready`: the spawned `dispatch` subprocess appended `--state` after
   the `dispatch` subcommand token instead of before it, so argparse (which
   only accepts `--state` on the root parser) silently rejected it whenever
