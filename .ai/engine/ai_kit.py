@@ -3,19 +3,24 @@
 from __future__ import annotations
 
 import argparse
+import fnmatch
 import os
 import json
 import re
+import shlex
 import sys
 import time
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
+SCRIPT = Path(__file__).resolve()
 WORK = ROOT / ".ai-work"
 STATE = WORK / "state" / "workflow.json"
 CURRENT = WORK / "state" / "current.json"
 EVENT_LOG = WORK / "logs" / "events.jsonl"
+STATUSES = ("todo", "in-progress", "implementation-complete", "qa-passed", "review-approved", "done", "blocked")
 def _load_registry() -> dict:
     """Load role→domain and role→core-skill mappings from registry.yaml."""
     registry_path = ROOT / ".ai" / "registry.yaml"
@@ -44,6 +49,36 @@ def _load_registry() -> dict:
     return {"owners": owners, "core_skills": {"names": core_names}}
 
 
+def _load_contexts() -> dict:
+    """Load the bounded-context/module registry from .ai/contexts.yaml.
+
+    Format:
+      contexts:
+        ordering:
+          path: src/ordering/*
+          owner: backend
+    `path` is an fnmatch glob (matches the whole relative path, `*` spans
+    `/`) checked against each task's `files` when G6 module_boundary is on.
+    """
+    path = ROOT / ".ai" / "contexts.yaml"
+    if not path.exists():
+        return {}
+    contexts: dict[str, dict] = {}
+    current = None
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip() or line.strip().startswith("#") or line.startswith("contexts:"):
+            continue
+        name_match = re.match(r"^  (\S+):\s*$", line)
+        if name_match:
+            current = name_match.group(1)
+            contexts[current] = {}
+            continue
+        field_match = re.match(r"^    (\w+):\s*(.+)$", line)
+        if field_match and current:
+            contexts[current][field_match.group(1)] = field_match.group(2).strip()
+    return contexts
+
+
 def _load_rules() -> dict:
     """Load gate rules from .ai/rules.yaml. Returns sensible defaults when the file is missing or malformed.
 
@@ -59,6 +94,7 @@ def _load_rules() -> dict:
         "db_changes_require_plan": True,  # db/migration work always needs a plan
         "no_secrets_in_commits": True,    # G4 - prevent secret commits
         "destructive_operations_require_approval": True,  # G5 - require explicit approval
+        "module_boundary": False,     # G6 - task files must stay inside its declared context path (opt-in)
     }
     rules_path = ROOT / ".ai" / "rules.yaml"
     if not rules_path.exists():
@@ -116,6 +152,7 @@ TRANSITIONS = {
     "close": ({"review-approved"}, "done"),
     "block": ({"todo", "in-progress", "implementation-complete", "qa-passed", "review-approved"}, "blocked"),
     "unblock": ({"blocked"}, "todo"),
+    "reject": ({"implementation-complete", "qa-passed"}, "todo"),
 }
 
 
@@ -210,10 +247,12 @@ def validate(state: dict) -> None:
     missing = required - set(state)
     if missing:
         raise EngineError(f"state missing keys: {', '.join(sorted(missing))}")
-    # Migrate v1 tasks that lack claimed_by
+    # Migrate v1 tasks that lack claimed_by, context, or epic
     for task in state.get("tasks", []):
         if "claimed_by" not in task:
             task["claimed_by"] = None
+        task.setdefault("context", None)
+        task.setdefault("epic", None)
     missing = set()  # reset after migration
     if missing:
         raise EngineError(f"state missing keys: {', '.join(sorted(missing))}")
@@ -288,6 +327,27 @@ def validate(state: dict) -> None:
                         f"G3 review_required: task {task['id']} is done but has no review evidence"
                     )
 
+    # G6 - Module boundary: configurable via rules.yaml `module_boundary` key (default off).
+    # When on, a task that declares a `context` may only touch files inside that
+    # context's registered path glob (.ai/contexts.yaml), so two agents working in
+    # different contexts (e.g. api vs database) in parallel can't silently collide.
+    if rules.get("module_boundary", False):
+        contexts = _load_contexts()
+        for task in state["tasks"]:
+            ctx_name = task.get("context")
+            if not ctx_name:
+                continue
+            if ctx_name not in contexts:
+                raise EngineError(f"G6 module_boundary: task {task['id']} has unknown context: {ctx_name}")
+            pattern = contexts[ctx_name].get("path")
+            if pattern:
+                offenders = [f for f in task.get("files", []) if not fnmatch.fnmatch(f, pattern)]
+                if offenders:
+                    raise EngineError(
+                        f"G6 module_boundary: task {task['id']} (context {ctx_name}) touches files "
+                        f"outside {pattern}: {', '.join(offenders)}"
+                    )
+
 
 def _parse_evidence_kind(path: str) -> str | None:
     """Extract the kind field from an evidence JSON file path. Returns None on failure."""
@@ -322,10 +382,14 @@ def sync_tasks_md(state: dict, state_path: Path) -> None:
     for task in state["tasks"]:
         status_mark = "x" if task["status"] == "done" else " "
         needs = f" | needs: {','.join(task['needs'])}" if task["needs"] else ""
-        lines.append(f"- [{status_mark}] {task['id']} {task['title']} | owner: {task['owner']}{needs} | phase: {task['phase']}")
+        context = f" | context: {task['context']}" if task.get("context") else ""
+        epic = f" | epic: {task['epic']}" if task.get("epic") else ""
+        lines.append(f"- [{status_mark}] {task['id']} {task['title']} | owner: {task['owner']}{needs} | phase: {task['phase']}{context}{epic}")
         for criterion in task["acceptance"]:
             lines.append(f"  - Accept: {criterion}")
         lines.append(f"  - Status: {task['status']}")
+        if task.get("blocked_reason"):
+            lines.append(f"  - Note: {task['blocked_reason']}")
     tasks_md.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
@@ -385,7 +449,7 @@ def cmd_add_task(args: argparse.Namespace) -> dict:
         raise EngineError(f"task already exists: {args.id}")
     if not args.acceptance:
         raise EngineError("add-task requires at least one --acceptance criterion")
-    task = {"id": args.id, "title": args.title, "owner": args.owner, "phase": args.phase, "needs": args.needs or [], "status": "todo", "acceptance": args.acceptance, "files": args.files or [], "tags": args.tags or [], "attempts": 0, "evidence": [], "blocked_reason": None, "claimed_by": None}
+    task = {"id": args.id, "title": args.title, "owner": args.owner, "phase": args.phase, "needs": args.needs or [], "status": "todo", "acceptance": args.acceptance, "files": args.files or [], "tags": args.tags or [], "attempts": 0, "evidence": [], "blocked_reason": None, "claimed_by": None, "context": getattr(args, "context", None), "epic": getattr(args, "epic", None)}
     state["tasks"].append(task)
     validate(state)
     sync_phases(state)
@@ -395,9 +459,39 @@ def cmd_add_task(args: argparse.Namespace) -> dict:
     return task
 
 
+def cmd_update_task(args: argparse.Namespace) -> dict:
+    path, state = state_path(args.state), load(state_path(args.state)); validate(state)
+    task = task_map(state).get(args.id)
+    if not task:
+        raise EngineError(f"unknown task: {args.id}")
+    if not args.add_acceptance and not args.add_files and not args.add_tags:
+        raise EngineError("update-task requires at least one of --add-acceptance, --add-files, --add-tags")
+    detail_parts = []
+    if args.add_acceptance:
+        task["acceptance"].extend(args.add_acceptance)
+        detail_parts.append("acceptance: " + "; ".join(args.add_acceptance))
+    if args.add_files:
+        task["files"].extend(f for f in args.add_files if f not in task["files"])
+        detail_parts.append("files: " + ", ".join(args.add_files))
+    if args.add_tags:
+        task["tags"].extend(t for t in args.add_tags if t not in task["tags"])
+        detail_parts.append("tags: " + ", ".join(args.add_tags))
+    sync_phases(state)
+    sync_tasks_md(state, path)
+    event(state, path, "update-task", task, args.actor, task["status"], task["status"], " | ".join(detail_parts))
+    save(state, path, state["revision"])
+    return task
+
+
 def cmd_ready(args: argparse.Namespace) -> list:
     state = load(state_path(args.state)); validate(state); tasks = task_map(state)
-    return [{"id": task["id"], "title": task["title"], "owner": task["owner"], "phase": task["phase"]} for task in state["tasks"] if runnable(task, tasks)]
+    context = getattr(args, "context", None)
+    epic = getattr(args, "epic", None)
+    return [
+        {"id": task["id"], "title": task["title"], "owner": task["owner"], "phase": task["phase"], "context": task.get("context"), "epic": task.get("epic")}
+        for task in state["tasks"]
+        if runnable(task, tasks) and (not context or task.get("context") == context) and (not epic or task.get("epic") == epic)
+    ]
 
 
 def cmd_transition(args: argparse.Namespace) -> dict:
@@ -410,22 +504,30 @@ def cmd_transition(args: argparse.Namespace) -> dict:
         raise EngineError(f"cannot {args.action} {args.id} from {task['status']}")
     if args.action == "start" and not runnable(task, task_map(state)):
         raise EngineError(f"task {args.id} is blocked by unfinished dependencies")
-    if args.action == "block" and not args.detail:
-        raise EngineError("block requires --detail")
+    if args.action in {"block", "reject"} and not args.detail:
+        raise EngineError(f"{args.action} requires --detail")
+    if args.action in {"qa-pass", "review-approve", "reject"}:
+        # P0-4: Executor must not QA/review/reject their own work. claimed_by may
+        # carry a per-agent-instance suffix ("role#agent_id"); compare on the role
+        # alone so this still blocks self-review when multiple agents share a role.
+        claimed_role = task["claimed_by"].split("#", 1)[0] if task.get("claimed_by") else None
+        if claimed_role and args.actor == claimed_role:
+            raise EngineError(f"{args.action} actor '{args.actor}' must differ from executor '{task['claimed_by']}'")
     if args.action in {"qa-pass", "review-approve"}:
         if not args.evidence:
             raise EngineError(f"{args.action} requires at least one --evidence path")
         validate_evidence(task, args.action, args.evidence)
-        # P0-4: Executor must not QA/review their own work
-        if task.get("claimed_by") and args.actor == task["claimed_by"]:
-            raise EngineError(f"{args.action} actor '{args.actor}' must differ from executor '{task['claimed_by']}'")
     old = task["status"]; task["status"] = target
-    task["blocked_reason"] = args.detail if target == "blocked" else None
+    if args.action in {"block", "reject"}:
+        task["blocked_reason"] = args.detail
+    elif args.action == "start":
+        task["blocked_reason"] = None
     if args.evidence:
         task["evidence"].extend(args.evidence)
     if args.action == "start":
         task["attempts"] += 1
-        task["claimed_by"] = args.actor
+        agent_id = getattr(args, "agent_id", None)
+        task["claimed_by"] = f"{args.actor}#{agent_id}" if agent_id else args.actor
     sync_phases(state)
     sync_tasks_md(state, path)
     event(state, path, args.action, task, args.actor, old, target, args.detail or "")
@@ -435,13 +537,36 @@ def cmd_transition(args: argparse.Namespace) -> dict:
     return task
 
 
+def _retry_transition(args: argparse.Namespace, retries: int = 4, backoff: float = 0.15) -> dict:
+    """Run cmd_transition, retrying on lost optimistic-concurrency races.
+
+    save() re-reads the on-disk revision at write time, so two processes
+    racing to claim the same task never corrupt state — the loser just gets
+    a "state changed concurrently" EngineError. This retries that loser a
+    few times (cmd_transition reloads state fresh each call, so every retry
+    re-checks preconditions like status/runnable against current disk state,
+    not stale in-memory data) so callers doing multi-task fan-out don't have
+    to hand-roll their own retry loop.
+    """
+    last_err: EngineError | None = None
+    for attempt in range(retries):
+        try:
+            return cmd_transition(args)
+        except EngineError as exc:
+            if "state changed concurrently" not in str(exc):
+                raise
+            last_err = exc
+            time.sleep(backoff * (attempt + 1))
+    raise last_err
+
+
 def cmd_plan(args: argparse.Namespace) -> dict:
     path = state_path(args.state)
     if path.exists() and not args.force:
         raise EngineError(f"state already exists: {path}; use --force to replace")
     state = new_state(args.idea, args.workflow)
     plan_task = {"id": "T1", "title": "Confirm scope and plan: " + args.idea, "owner": "planner", "phase": "plan", "needs": [], "status": "todo", "acceptance": ["Scope, exclusions, risks, and acceptance criteria confirmed"], "files": [".ai-work/roadmap/roadmap.md", ".ai-work/plan/plan.md", ".ai-work/tasks/tasks.md"], "tags": ["planning"], "attempts": 0, "evidence": [], "blocked_reason": None, "claimed_by": None}
-    build_task = {"id": "T2", "title": args.idea, "owner": args.owner, "phase": args.phase, "needs": ["T1"], "status": "todo", "acceptance": args.acceptance, "files": args.files or [], "tags": args.tags or [], "attempts": 0, "evidence": [], "blocked_reason": None, "claimed_by": None}
+    build_task = {"id": "T2", "title": args.idea, "owner": args.owner, "phase": args.phase, "needs": ["T1"], "status": "todo", "acceptance": args.acceptance, "files": args.files or [], "tags": args.tags or [], "attempts": 0, "evidence": [], "blocked_reason": None, "claimed_by": None, "context": getattr(args, "context", None), "epic": getattr(args, "epic", None)}
     state["tasks"] = [plan_task, build_task]; validate(state); sync_phases(state)
     root = workspace(path)
     root.joinpath("roadmap").mkdir(parents=True, exist_ok=True); root.joinpath("plan").mkdir(parents=True, exist_ok=True); root.joinpath("tasks").mkdir(parents=True, exist_ok=True)
@@ -475,11 +600,57 @@ def cmd_route(args: argparse.Namespace) -> dict:
     return {"task": task["id"], "owner": role, "tags": task["tags"], "role_contract": (Path(".ai") / "agents" / role).as_posix(), "skills": skills, "context": [display_path(root / "plan" / "plan.md"), display_path(root / "tasks" / "tasks.md"), ".ai/engine/state-schema.md"] + task["files"]}
 
 
+def cmd_context_add(args: argparse.Namespace) -> dict:
+    path = ROOT / ".ai" / "contexts.yaml"
+    contexts = _load_contexts()
+    if args.name in contexts:
+        raise EngineError(f"context already registered: {args.name}")
+    contexts[args.name] = {"path": args.path, "owner": args.owner}
+    lines = ["contexts:"]
+    for name, fields in sorted(contexts.items()):
+        lines.append(f"  {name}:")
+        lines.append(f"    path: {fields['path']}")
+        lines.append(f"    owner: {fields['owner']}")
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return {"name": args.name, "path": args.path, "owner": args.owner}
+
+
+def cmd_context_list(args: argparse.Namespace) -> dict:
+    return _load_contexts()
+
+
+def cmd_epics(args: argparse.Namespace) -> list:
+    state = load(state_path(args.state)); validate(state)
+    groups: dict[str, dict] = {}
+    for task in state["tasks"]:
+        epic = task.get("epic")
+        if not epic:
+            continue
+        group = groups.setdefault(epic, {"total": 0, "done": 0, "counts": {status: 0 for status in STATUSES}})
+        group["total"] += 1
+        group["counts"][task["status"]] += 1
+        if task["status"] == "done":
+            group["done"] += 1
+    return [
+        {"epic": name, "total": g["total"], "done": g["done"], "percent_done": round(100 * g["done"] / g["total"], 1), "counts": g["counts"]}
+        for name, g in sorted(groups.items())
+    ]
+
+
 def cmd_status(args: argparse.Namespace) -> dict:
     state = load(state_path(args.state)); validate(state)
-    counts = {status: 0 for status in ("todo", "in-progress", "implementation-complete", "qa-passed", "review-approved", "done", "blocked")}
-    for task in state["tasks"]: counts[task["status"]] += 1
-    return {"title": state["title"], "revision": state["revision"], "counts": counts, "phases": sync_phases(state) or state["phases"]}
+    context = getattr(args, "context", None)
+    epic = getattr(args, "epic", None)
+    scoped = [
+        task for task in state["tasks"]
+        if (not context or task.get("context") == context) and (not epic or task.get("epic") == epic)
+    ]
+    counts = {status: 0 for status in STATUSES}
+    for task in scoped: counts[task["status"]] += 1
+    result = {"title": state["title"], "revision": state["revision"], "counts": counts, "phases": sync_phases(state) or state["phases"]}
+    if context: result["context"] = context
+    if epic: result["epic"] = epic
+    return result
 
 
 def cmd_timeline(args: argparse.Namespace) -> list:
@@ -494,10 +665,13 @@ def cmd_blocked(args: argparse.Namespace) -> list:
 
 def cmd_graph(args: argparse.Namespace) -> str:
     state = load(state_path(args.state)); validate(state)
+    context = getattr(args, "context", None)
+    tasks = [t for t in state["tasks"] if not context or t.get("context") == context]
+    included = {t["id"] for t in tasks}
     lines = ["digraph workflow {"]
-    for task in state["tasks"]:
+    for task in tasks:
         lines.append(f'  "{task["id"]}" [label="{task["id"]}: {task["title"]}"];')
-        lines.extend(f'  "{dep}" -> "{task["id"]}";' for dep in task["needs"])
+        lines.extend(f'  "{dep}" -> "{task["id"]}";' for dep in task["needs"] if dep in included)
     return "\n".join(lines + ["}"])
 
 
@@ -554,8 +728,18 @@ def cmd_dispatch(args: argparse.Namespace) -> dict:
     if args.runner not in runners:
         raise EngineError(f"unknown runner profile: {args.runner}. Available: {', '.join(runners.keys())}")
     template = runners[args.runner]
+    # The State Manager, not the runner, owns lifecycle transitions: claim the
+    # task (todo -> in-progress) here so the runner only ever needs to report
+    # completion, matching the single `complete` transition it is prompted for.
+    if task["status"] == "todo":
+        start_args = argparse.Namespace(state=args.state, id=task["id"], action="start", actor=task["owner"], detail=f"auto-started for dispatch to runner '{args.runner}'", evidence=None, expected_revision=None, agent_id=getattr(args, "agent_id", None))
+        task = _retry_transition(start_args)
+    elif task["status"] != "in-progress":
+        raise EngineError(f"cannot dispatch {task['id']} from status {task['status']} (must be todo or in-progress)")
     prompt = f"Bạn là {task['owner']}. Thực thi task {task['id']} theo yêu cầu trong .ai-work/tasks/tasks.md. Không vi phạm AGENTS.md. Xong việc gọi lệnh: bash .ai/scripts/ai-kit transition {task['id']} complete --actor {task['owner']} --detail 'Hoàn thành bởi {args.runner}'"
-    cmd = template.replace("{prompt}", prompt.replace("'", "'\\''"))
+    # Runner templates hold {prompt} unquoted; shlex.quote is the single
+    # place quoting happens, so a template can never double-quote it.
+    cmd = template.replace("{prompt}", shlex.quote(prompt))
     print(f"Dispatching task {task['id']} to runner '{args.runner}'...", file=sys.stderr)
     result = _sp.run(cmd, shell=True, cwd=str(ROOT))
     # Audit log
@@ -568,6 +752,43 @@ def cmd_dispatch(args: argparse.Namespace) -> dict:
     return {"task": task["id"], "runner": args.runner, "status": "dispatched"}
 
 
+def cmd_dispatch_ready(args: argparse.Namespace) -> dict:
+    """Claim up to --limit ready tasks and dispatch each to a background runner.
+
+    Claiming (the todo -> in-progress transition) happens sequentially here,
+    through _retry_transition, so two dispatch-ready invocations racing over
+    the same ready tasks never double-claim one. Once a task is claimed its
+    runner process is spawned with Popen (not waited on), so N claimed tasks
+    actually execute concurrently instead of one after another.
+    """
+    import subprocess as _sp
+    state = load(state_path(args.state)); validate(state)
+    tasks = task_map(state)
+    candidates = [t for t in state["tasks"] if runnable(t, tasks)]
+    if args.context:
+        candidates = [t for t in candidates if t.get("context") == args.context]
+    if args.epic:
+        candidates = [t for t in candidates if t.get("epic") == args.epic]
+    limit = args.limit if args.limit else len(candidates)
+    claimed = []
+    for task in candidates[:limit]:
+        agent_id = args.agent_id or uuid.uuid4().hex[:8]
+        start_args = argparse.Namespace(state=args.state, id=task["id"], action="start", actor=task["owner"], detail=f"auto-claimed by dispatch-ready for runner '{args.runner}'", evidence=None, expected_revision=None, agent_id=agent_id)
+        try:
+            _retry_transition(start_args)
+        except EngineError:
+            continue  # lost the claim race, or no longer runnable; skip rather than substitute another task
+        claimed.append({"task": task["id"], "agent_id": agent_id})
+    spawned = []
+    for entry in claimed:
+        cmd = ["bash", str(ROOT / ".ai" / "scripts" / "ai-kit"), "dispatch", entry["task"], "--runner", args.runner, "--agent-id", entry["agent_id"]]
+        if args.state:
+            cmd += ["--state", args.state]
+        proc = _sp.Popen(cmd, cwd=str(ROOT))
+        spawned.append({"task": entry["task"], "agent_id": entry["agent_id"], "pid": proc.pid})
+    return {"runner": args.runner, "candidates": len(candidates), "claimed": len(claimed), "spawned": spawned}
+
+
 def cmd_verify(args: argparse.Namespace) -> dict:
     """Run verification checks and produce a report. Does NOT auto-approve."""
     import subprocess as _sp
@@ -578,6 +799,7 @@ def cmd_verify(args: argparse.Namespace) -> dict:
     report = {"task": task["id"], "checks": [], "passed": True}
     print(f"Verifying task {task['id']}...", file=sys.stderr)
     manifest = ROOT / ".ai" / "kit.yaml"
+    executed_quality_checks = 0
     if manifest.exists():
         text = manifest.read_text(encoding="utf-8")
         for key in ("test_command", "lint_command", "typecheck_command", "build_command"):
@@ -587,6 +809,7 @@ def cmd_verify(args: argparse.Namespace) -> dict:
                 if cmd == "true":
                     report["checks"].append({"name": key, "status": "skipped"})
                     continue
+                executed_quality_checks += 1
                 print(f"  Running {key}: {cmd}", file=sys.stderr)
                 result = _sp.run(cmd, shell=True, cwd=str(ROOT), capture_output=True, text=True)
                 check = {"name": key, "command": cmd, "exit_code": result.returncode, "status": "pass" if result.returncode == 0 else "fail"}
@@ -594,6 +817,15 @@ def cmd_verify(args: argparse.Namespace) -> dict:
                     check["stderr"] = result.stderr[-500:] if result.stderr else ""
                     report["passed"] = False
                 report["checks"].append(check)
+    if executed_quality_checks == 0:
+        warning = (
+            "no test/lint/typecheck/build command is configured in .ai/kit.yaml "
+            "(all are 'true' or missing) — verify only ran security gates and did "
+            "NOT check functional correctness. Run 'ai-kit onboard --apply' or edit "
+            ".ai/kit.yaml's verification section for a real project."
+        )
+        report["warning"] = warning
+        print(f"  WARNING: {warning}", file=sys.stderr)
     gates = ROOT / ".ai" / "scripts" / "check-gates.sh"
     if gates.exists():
         print("  Running security gates (G4)...", file=sys.stderr)
@@ -619,18 +851,24 @@ def parser() -> argparse.ArgumentParser:
     root.add_argument("--json", action="store_true", help="always print JSON")
     sub = root.add_subparsers(dest="command", required=True)
     init = sub.add_parser("init"); init.add_argument("--title", required=True); init.add_argument("--workflow", required=True); init.add_argument("--actor", default="planner"); init.add_argument("--force", action="store_true"); init.set_defaults(fn=cmd_init)
-    add = sub.add_parser("add-task"); add.add_argument("id"); add.add_argument("--title", required=True); add.add_argument("--owner", required=True); add.add_argument("--phase", required=True); add.add_argument("--needs", nargs="*"); add.add_argument("--acceptance", nargs="+", required=True); add.add_argument("--files", nargs="*"); add.add_argument("--tags", nargs="*"); add.add_argument("--actor", default="planner"); add.set_defaults(fn=cmd_add_task)
-    ready = sub.add_parser("ready"); ready.set_defaults(fn=cmd_ready)
-    plan = sub.add_parser("plan"); plan.add_argument("--idea", required=True); plan.add_argument("--workflow", default="feature"); plan.add_argument("--owner", required=True); plan.add_argument("--acceptance", nargs="+", required=True); plan.add_argument("--files", nargs="*"); plan.add_argument("--tags", nargs="*"); plan.add_argument("--phase", default="build"); plan.add_argument("--scope"); plan.add_argument("--out-of-scope"); plan.add_argument("--risks", nargs="*"); plan.add_argument("--assumptions"); plan.add_argument("--actor", default="planner"); plan.add_argument("--force", action="store_true"); plan.set_defaults(fn=cmd_plan)
-    trans = sub.add_parser("transition"); trans.add_argument("id"); trans.add_argument("action", choices=TRANSITIONS); trans.add_argument("--actor", required=True); trans.add_argument("--detail"); trans.add_argument("--evidence", nargs="+"); trans.add_argument("--expected-revision", type=int); trans.set_defaults(fn=cmd_transition)
+    add = sub.add_parser("add-task"); add.add_argument("id"); add.add_argument("--title", required=True); add.add_argument("--owner", required=True); add.add_argument("--phase", required=True); add.add_argument("--needs", nargs="*"); add.add_argument("--acceptance", nargs="+", required=True); add.add_argument("--files", nargs="*"); add.add_argument("--tags", nargs="*"); add.add_argument("--context"); add.add_argument("--epic"); add.add_argument("--actor", default="planner"); add.set_defaults(fn=cmd_add_task)
+    update = sub.add_parser("update-task"); update.add_argument("id"); update.add_argument("--add-acceptance", nargs="+"); update.add_argument("--add-files", nargs="*"); update.add_argument("--add-tags", nargs="*"); update.add_argument("--actor", default="planner"); update.set_defaults(fn=cmd_update_task)
+    ready = sub.add_parser("ready"); ready.add_argument("--context"); ready.add_argument("--epic"); ready.set_defaults(fn=cmd_ready)
+    plan = sub.add_parser("plan"); plan.add_argument("--idea", required=True); plan.add_argument("--workflow", default="feature"); plan.add_argument("--owner", required=True); plan.add_argument("--acceptance", nargs="+", required=True); plan.add_argument("--files", nargs="*"); plan.add_argument("--tags", nargs="*"); plan.add_argument("--phase", default="build"); plan.add_argument("--context"); plan.add_argument("--epic"); plan.add_argument("--scope"); plan.add_argument("--out-of-scope"); plan.add_argument("--risks", nargs="*"); plan.add_argument("--assumptions"); plan.add_argument("--actor", default="planner"); plan.add_argument("--force", action="store_true"); plan.set_defaults(fn=cmd_plan)
+    trans = sub.add_parser("transition"); trans.add_argument("id"); trans.add_argument("action", choices=TRANSITIONS); trans.add_argument("--actor", required=True); trans.add_argument("--detail"); trans.add_argument("--evidence", nargs="+"); trans.add_argument("--expected-revision", type=int); trans.add_argument("--agent-id", help="unique identity of the agent instance, appended to claimed_by as 'actor#agent_id' for audit when multiple agents share a role"); trans.set_defaults(fn=cmd_transition)
     approve = sub.add_parser("approve"); approve.add_argument("id"); approve.add_argument("--role", choices=["qa", "review"], required=True); approve.add_argument("--status"); approve.add_argument("--reason", required=True); approve.set_defaults(fn=cmd_approve)
     verify = sub.add_parser("verify"); verify.add_argument("id"); verify.set_defaults(fn=cmd_verify)
-    dispatch = sub.add_parser("dispatch"); dispatch.add_argument("id"); dispatch.add_argument("--runner", required=True); dispatch.set_defaults(fn=cmd_dispatch)
+    dispatch = sub.add_parser("dispatch"); dispatch.add_argument("id"); dispatch.add_argument("--runner", required=True); dispatch.add_argument("--agent-id"); dispatch.set_defaults(fn=cmd_dispatch)
+    dispatch_ready = sub.add_parser("dispatch-ready"); dispatch_ready.add_argument("--runner", required=True); dispatch_ready.add_argument("--limit", type=int); dispatch_ready.add_argument("--context"); dispatch_ready.add_argument("--epic"); dispatch_ready.add_argument("--agent-id"); dispatch_ready.set_defaults(fn=cmd_dispatch_ready)
     route = sub.add_parser("route"); route.add_argument("id"); route.set_defaults(fn=cmd_route)
-    status = sub.add_parser("status"); status.set_defaults(fn=cmd_status)
+    status = sub.add_parser("status"); status.add_argument("--context"); status.add_argument("--epic"); status.set_defaults(fn=cmd_status)
     timeline = sub.add_parser("timeline"); timeline.set_defaults(fn=cmd_timeline)
     blocked = sub.add_parser("blocked"); blocked.set_defaults(fn=cmd_blocked)
-    graph = sub.add_parser("graph"); graph.set_defaults(fn=cmd_graph)
+    graph = sub.add_parser("graph"); graph.add_argument("--context"); graph.set_defaults(fn=cmd_graph)
+    context = sub.add_parser("context"); context_sub = context.add_subparsers(dest="context_command", required=True)
+    context_add = context_sub.add_parser("add"); context_add.add_argument("name"); context_add.add_argument("--path", required=True); context_add.add_argument("--owner", required=True); context_add.set_defaults(fn=cmd_context_add)
+    context_list = context_sub.add_parser("list"); context_list.set_defaults(fn=cmd_context_list)
+    epics = sub.add_parser("epics"); epics.set_defaults(fn=cmd_epics)
     onboard = sub.add_parser("onboard"); onboard.add_argument("--apply", action="store_true"); onboard.set_defaults(fn=cmd_onboard)
     show = sub.add_parser("show"); show.set_defaults(fn=cmd_show)
     valid = sub.add_parser("validate"); valid.set_defaults(fn=lambda args: (validate(load(state_path(args.state))) or {"valid": True}))

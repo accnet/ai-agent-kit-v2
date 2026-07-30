@@ -19,6 +19,10 @@
     },
     "close": {
       "requires_status": "review-approved"
+    },
+    "reject": {
+      "requires_detail": true,
+      "actor_must_differ_from": "claimed_by"
     }
   },
   "allowed_transitions": {
@@ -28,6 +32,7 @@
     "review-approve": {"from": ["qa-passed"], "to": "review-approved"},
     "close": {"from": ["review-approved"], "to": "done"},
     "block": {"from": ["todo", "in-progress", "implementation-complete", "qa-passed", "review-approved"], "to": "blocked"},
-    "unblock": {"from": ["blocked"], "to": "todo"}
+    "unblock": {"from": ["blocked"], "to": "todo"},
+    "reject": {"from": ["implementation-complete", "qa-passed"], "to": "todo"}
   }
 }

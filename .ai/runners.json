@@ -1,12 +1,13 @@
 {
-  "cline-pass": "cline -P cline-pass -m 'cline-pass/glm-5.2' --auto-approve true '{prompt}'",
-  "deepseek-v4-pro": "cline -P deepseek -m 'deepseek-v4-pro' --auto-approve true '{prompt}'",
-  "deepseek-v4-flash": "cline -P deepseek -m 'deepseek-v4-flash' --auto-approve true '{prompt}'",
-  "codex-5.5": "echo '' | codex exec -m 5.5 '{prompt}'",
-  "codex-5.6": "echo '' | codex exec -m 5.6 '{prompt}'",
-  "codex-5.6-luna": "echo '' | codex exec -m gpt-5.6-luna '{prompt}'",
-  "codex-opus": "echo '' | codex exec -m opus '{prompt}'",
-  "codex-sonnet": "echo '' | codex exec -m sonnet '{prompt}'",
-  "codex-haiku": "echo '' | codex exec -m haiku '{prompt}'",
-  "codex-auto": "echo '' | codex exec -m gpt-5.6-luna '{prompt}'"
+  "cline-pass": "cline -P cline-pass -m 'cline-pass/glm-5.2' --auto-approve true {prompt}",
+  "deepseek-v4-pro": "cline -P deepseek -m 'deepseek-v4-pro' --auto-approve true {prompt}",
+  "deepseek-v4-flash": "cline -P deepseek -m 'deepseek-v4-flash' --auto-approve true {prompt}",
+  "codex-5.5": "echo '' | codex exec -m 5.5 {prompt}",
+  "codex-5.6": "echo '' | codex exec -m 5.6 {prompt}",
+  "codex-5.6-luna": "echo '' | codex exec -m gpt-5.6-luna {prompt}",
+  "codex-opus": "echo '' | codex exec -m opus {prompt}",
+  "codex-sonnet": "echo '' | codex exec -m sonnet {prompt}",
+  "codex-haiku": "echo '' | codex exec -m haiku {prompt}",
+  "codex-auto": "echo '' | codex exec -m gpt-5.6-luna {prompt}",
+  "claude": "env -u ANTHROPIC_AUTH_TOKEN -u ANTHROPIC_BASE_URL claude -p {prompt} --permission-mode acceptEdits"
 }

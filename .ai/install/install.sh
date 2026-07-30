@@ -2,13 +2,13 @@
 # Install this nested AI-Kit into its parent project directory.
 set -euo pipefail
 
-SOURCE="$(cd "$(dirname "$0")" && pwd)"
+SOURCE="$(cd "$(dirname "$0")/../.." && pwd)"
 TARGET="$(cd "$SOURCE/.." && pwd)"
 FORCE=0
 DRY_RUN=0
 
 usage() {
-  echo "Usage: bash ai-kit/install.sh [--target <project-root>] [--force] [--dry-run]"
+  echo "Usage: bash ai-kit/.ai/install/install.sh [--target <project-root>] [--force] [--dry-run]"
 }
 
 while [[ $# -gt 0 ]]; do
@@ -29,11 +29,23 @@ for item in "${PATHS[@]}"; do
   source_path="$SOURCE/$item"
   [[ -e "$source_path" ]] || continue
   if [[ -d "$source_path" ]]; then
-    while IFS= read -r -d '' file; do FILES+=("$file"); done < <(find "$source_path" -type f -print0)
+    while IFS= read -r -d '' file; do FILES+=("$file"); done < <(find "$source_path" \( -type f -o -type l \) -print0)
   else
     FILES+=("$source_path")
   fi
 done
+
+# Drop build artifacts / local-only config that happen to live under a
+# managed path (__pycache__, .claude/settings.local.json, ...) but keep
+# untracked-yet-real files, so this only relies on .gitignore, not history.
+if git -C "$SOURCE" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  KEPT=()
+  for file in "${FILES[@]}"; do
+    rel="${file#$SOURCE/}"
+    git -C "$SOURCE" check-ignore -q -- "$rel" || KEPT+=("$file")
+  done
+  FILES=("${KEPT[@]}")
+fi
 
 CONFLICTS=0
 for file in "${FILES[@]}"; do
