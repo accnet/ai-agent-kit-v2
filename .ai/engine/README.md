@@ -26,8 +26,14 @@ python .ai/engine/ai_kit.py update-task T1 --add-acceptance "Bird hitting the ce
 python .ai/engine/ai_kit.py verify T1
 python .ai/engine/ai_kit.py context add ordering --path "src/ordering/*" --owner backend
 python .ai/engine/ai_kit.py add-task T3 --title "Ship order API" --owner backend --phase build --acceptance "..." --context ordering --epic checkout-revamp
+python .ai/engine/ai_kit.py add-task T4 --title "Read API contract" --owner backend --phase build --acceptance "..." --depends-on .ai/engine/state-schema.md --depends-on .ai/engine/README.md
 python .ai/engine/ai_kit.py epics
 python .ai/engine/ai_kit.py dispatch-ready --runner claude --limit 3 --context ordering
+python .ai/engine/ai_kit.py context add ordering --path "src/ordering/**/*" --owner backend --force
+python .ai/engine/ai_kit.py epic add checkout-revamp --spec .ai-work/plan/checkout-revamp-spec.md --owner planner
+python .ai/engine/ai_kit.py epic add checkout-revamp --spec .ai-work/plan/checkout-revamp-spec.md --owner planner --force
+python .ai/engine/ai_kit.py drift T3
+python .ai/engine/ai_kit.py board --context ordering --format markdown --write
 ```
 
 `complete` means implementation complete. A task becomes `done` only after
@@ -72,3 +78,44 @@ Pass `--agent-id` (to `transition`, `dispatch`, or `dispatch-ready`) to give
 each concurrent agent instance a distinct identity — it's recorded as
 `claimed_by: "role#agent_id"` so the audit trail can tell apart multiple
 agents sharing one role.
+
+Every task also records `base_commit` (git HEAD at creation),
+`context_revision` (its context's `.ai/contexts.yaml` revision at creation),
+and `epic_revision` (its epic's Specification revision in `.ai/epics.yaml`
+at creation) automatically. `context add ... --force` bumps a context's
+revision when its path/owner changes; `epic add <name> --spec <path>
+[--owner <role>] --force` does the same for an epic's Specification doc.
+`ai-kit drift <task-id>` then reports whether a task's context or epic has
+gone stale since it was planned, and lists files that changed (`git diff
+--name-only`) since its `base_commit`. This is informational only — it
+never blocks a transition — meant to be checked before dispatch/review on a
+task that's been sitting a while, especially one whose Specification or a
+contract it depends on may have moved since it was created.
+
+Tasks may also declare repeatable `--depends-on <path>` contract/interface
+files. At creation, each path is read directly and stored in
+`contract_hashes` as `path -> sha256(file contents)`; no registry file is
+needed. `ai-kit drift <task-id>` reports `contract_stale`, the paths whose
+current content hash differs from the recorded hash or whose file is missing,
+and `drift_unavailable`, declared paths that errored on read (for example a
+path replaced by a directory) rather than being cleanly missing or changed.
+An unchanged dependency is not reported stale. `validate()` supplies empty
+`depends_on` and `contract_hashes` fields when migrating older task state.
+
+`ai-kit board [--context C] [--epic E] [--owner O] [--write]
+[--format json|markdown]` renders a read-only planner board grouped by every
+workflow status. Filters are exact and combinable. JSON keeps all seven status
+keys; Markdown omits empty sections and is emitted raw. Entries include
+`id`, `title`, `owner_display`, `context`, `epic`, optional `blocked_reason`,
+and read-time flags for blocked, stale context/epic/contracts, or unavailable
+drift reads. The board and `drift` use the same drift computation. `--write`
+also creates `.ai-work/board.md`; it never changes `workflow.json` or its
+revision.
+
+Run `bash .ai/scripts/test-kit.sh` to exercise the engine's own behavior:
+`tests/test_ai_kit.py` (stdlib `unittest`, no third-party deps) drives the
+CLI as a subprocess against isolated tempfile-based `--state` paths, covering
+the task lifecycle, self-review guard, block/unblock/reject, context/epic/
+contract drift, board filters and board/drift flag parity, and the `graph`
+raw-output regression. It never touches this repo's real `.ai-work` state or
+leaves residue in `.ai/contexts.yaml`/`.ai/epics.yaml`.

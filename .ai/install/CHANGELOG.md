@@ -4,6 +4,40 @@
 
 ### Added
 
+- Local engine test suite: `.ai/scripts/test-kit.sh` runs
+  `tests/test_ai_kit.py` (stdlib `unittest`, no third-party deps), which
+  drives the CLI as a subprocess against isolated tempfile-based `--state`
+  paths and covers the task lifecycle, block/unblock/reject, context/epic/
+  contract drift (including `drift_unavailable`), board filters and
+  board/drift flag parity, and the `graph` raw-output regression, without
+  touching this repo's real `.ai-work` state.
+- AI Planner Board: `ai-kit board` groups filtered tasks into stable JSON
+  status columns or concise Markdown sections, supports exact combinable
+  `--context`/`--epic`/`--owner` filters, and `--write` additionally writes
+  `.ai-work/board.md` without mutating workflow state. Board entries expose
+  blocked, context/epic/contract staleness, and unavailable-drift flags using
+  the same read-time computation as `ai-kit drift`; raw Markdown output is
+  printed without JSON quoting.
+
+- Contract/interface provenance: `add-task` and `plan` accept repeatable
+  `--depends-on <path>`, record each file's SHA-256 in `contract_hashes`, and
+  `ai-kit drift <task-id>` reports changed or missing dependencies in
+  `contract_stale`. Older tasks are migrated with empty `depends_on` and
+  `contract_hashes` fields.
+- Task provenance/drift: every task now records `base_commit` (git HEAD at
+  creation), `context_revision` (its context's `.ai/contexts.yaml`
+  revision at creation), and `epic_revision` (its epic's Specification
+  revision at creation), captured automatically. `context add --force`
+  updates an existing context and bumps its revision. `ai-kit drift
+  <task-id>` reports (read-only, non-blocking) whether commits landed since
+  `base_commit` and whether the task's context or epic has been revised
+  since — signal for whether a long-lived task needs a re-plan before
+  dispatch.
+- Epic Specification registry: `.ai/epics.yaml` (`epic add <name> --spec
+  <path> [--owner <role>] [--force]`, `epic list`) optionally registers an
+  epic's Specification doc and tracks its revision, enabling `epic_revision`
+  drift detection above. Registering an epic is optional — `task.epic`
+  still works as a plain free-form tag with no registry entry.
 - `reject` transition: sends `implementation-complete`/`qa-passed` tasks back
   to `todo` when QA/review finds work that must be redone, distinct from
   `block` (external impediments). Requires a `detail` and an actor different
@@ -41,6 +75,17 @@
 
 ### Fixed
 
+- `--acceptance` (`add-task`/`plan`) and `--add-acceptance` (`update-task`)
+  now accumulate across repeated flag occurrences instead of the last
+  occurrence silently overwriting the previous ones (`argparse`'s `nargs="+"`
+  footgun). The single-flag multi-value form (`--acceptance "a" "b"`) still
+  works unchanged; repeating the flag now also works as expected.
+- `ai-kit drift <task-id>` now also reports `drift_unavailable` (declared
+  `depends_on` paths that errored on read, e.g. replaced by a directory),
+  matching the flag `ai-kit board` already exposed via the same shared
+  computation. Previously such a path silently showed as healthy
+  (`contract_stale: []`) in `drift`'s own output. Additive only — all
+  existing `drift` fields are unchanged.
 - `install.sh`/`install.ps1`: `SOURCE` path resolution now accounts for both
   scripts living two directories deep (`.ai/install/`) — a prior refactor
   moved them from the kit root without updating the path math, so installs

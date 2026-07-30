@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import fnmatch
 import os
 import json
@@ -49,6 +50,35 @@ def _load_registry() -> dict:
     return {"owners": owners, "core_skills": {"names": core_names}}
 
 
+def _load_yaml_registry(relative_path: str, top_key: str) -> dict:
+    """Minimal indented-YAML reader shared by the context/epic registries.
+
+    Format:
+      <top_key>:
+        <name>:
+          <field>: <value>
+          ...
+    """
+    path = ROOT / relative_path
+    if not path.exists():
+        return {}
+    entries: dict[str, dict] = {}
+    current = None
+    header = f"{top_key}:"
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip() or line.strip().startswith("#") or line.startswith(header):
+            continue
+        name_match = re.match(r"^  (\S+):\s*$", line)
+        if name_match:
+            current = name_match.group(1)
+            entries[current] = {}
+            continue
+        field_match = re.match(r"^    (\w+):\s*(.+)$", line)
+        if field_match and current:
+            entries[current][field_match.group(1)] = field_match.group(2).strip()
+    return entries
+
+
 def _load_contexts() -> dict:
     """Load the bounded-context/module registry from .ai/contexts.yaml.
 
@@ -60,23 +90,86 @@ def _load_contexts() -> dict:
     `path` is an fnmatch glob (matches the whole relative path, `*` spans
     `/`) checked against each task's `files` when G6 module_boundary is on.
     """
-    path = ROOT / ".ai" / "contexts.yaml"
-    if not path.exists():
-        return {}
-    contexts: dict[str, dict] = {}
-    current = None
-    for line in path.read_text(encoding="utf-8").splitlines():
-        if not line.strip() or line.strip().startswith("#") or line.startswith("contexts:"):
-            continue
-        name_match = re.match(r"^  (\S+):\s*$", line)
-        if name_match:
-            current = name_match.group(1)
-            contexts[current] = {}
-            continue
-        field_match = re.match(r"^    (\w+):\s*(.+)$", line)
-        if field_match and current:
-            contexts[current][field_match.group(1)] = field_match.group(2).strip()
-    return contexts
+    return _load_yaml_registry(".ai/contexts.yaml", "contexts")
+
+
+def _load_epics() -> dict:
+    """Load the epic/specification registry from .ai/epics.yaml.
+
+    Format:
+      epics:
+        checkout-revamp:
+          spec: .ai-work/plan/checkout-revamp-spec.md
+          owner: planner
+          revision: 1
+    Registering an epic here is optional — `task.epic` works as a free-form
+    tag with no registry entry, same as `context`. Registering it enables
+    `epic_revision` drift tracking (see `_epic_revision`, `cmd_drift`).
+    """
+    return _load_yaml_registry(".ai/epics.yaml", "epics")
+
+
+def _git_head() -> str | None:
+    """Return the repo's current HEAD commit hash, or None outside git / before the first commit."""
+    import subprocess as _sp
+    try:
+        result = _sp.run(["git", "-C", str(ROOT), "rev-parse", "HEAD"], capture_output=True, text=True, timeout=5)
+        return result.stdout.strip() if result.returncode == 0 else None
+    except Exception:
+        return None
+
+
+def _context_revision(name: str | None) -> int | None:
+    """Return the registered revision of a context, or None if unset/unregistered."""
+    if not name:
+        return None
+    contexts = _load_contexts()
+    if name not in contexts or "revision" not in contexts[name]:
+        return None
+    try:
+        return int(contexts[name]["revision"])
+    except ValueError:
+        return None
+
+
+def _epic_revision(name: str | None) -> int | None:
+    """Return the registered specification revision of an epic, or None if unset/unregistered."""
+    if not name:
+        return None
+    epics = _load_epics()
+    if name not in epics or "revision" not in epics[name]:
+        return None
+    try:
+        return int(epics[name]["revision"])
+    except ValueError:
+        return None
+
+
+def _contract_path(path: str) -> Path:
+    """Resolve a dependency path from the repository root or an absolute path."""
+    candidate = Path(path)
+    return candidate if candidate.is_absolute() else ROOT / candidate
+
+
+def _flatten_repeated(groups: list[list[str]] | None) -> list[str]:
+    """Flatten a nargs='+' + action='append' value: each flag occurrence contributes
+    one group, so repeating the flag accumulates instead of overwriting the previous
+    occurrence (the plain nargs='+' footgun this replaces)."""
+    return [item for group in (groups or []) for item in group]
+
+
+def _contract_hashes(paths: list[str]) -> dict[str, str]:
+    """Hash declared contract files at task creation time."""
+    hashes = {}
+    for path in paths:
+        file_path = _contract_path(path)
+        if not file_path.is_file():
+            raise EngineError(f"depends-on path does not exist or is not a file: {path}")
+        try:
+            hashes[path] = hashlib.sha256(file_path.read_bytes()).hexdigest()
+        except OSError as exc:
+            raise EngineError(f"cannot read depends-on path: {path}") from exc
+    return hashes
 
 
 def _load_rules() -> dict:
@@ -247,12 +340,17 @@ def validate(state: dict) -> None:
     missing = required - set(state)
     if missing:
         raise EngineError(f"state missing keys: {', '.join(sorted(missing))}")
-    # Migrate v1 tasks that lack claimed_by, context, or epic
+    # Migrate older tasks that lack claimed_by, context, epic, or provenance fields
     for task in state.get("tasks", []):
         if "claimed_by" not in task:
             task["claimed_by"] = None
         task.setdefault("context", None)
         task.setdefault("epic", None)
+        task.setdefault("base_commit", None)
+        task.setdefault("context_revision", None)
+        task.setdefault("epic_revision", None)
+        task.setdefault("depends_on", [])
+        task.setdefault("contract_hashes", {})
     missing = set()  # reset after migration
     if missing:
         raise EngineError(f"state missing keys: {', '.join(sorted(missing))}")
@@ -382,9 +480,19 @@ def sync_tasks_md(state: dict, state_path: Path) -> None:
     for task in state["tasks"]:
         status_mark = "x" if task["status"] == "done" else " "
         needs = f" | needs: {','.join(task['needs'])}" if task["needs"] else ""
-        context = f" | context: {task['context']}" if task.get("context") else ""
-        epic = f" | epic: {task['epic']}" if task.get("epic") else ""
-        lines.append(f"- [{status_mark}] {task['id']} {task['title']} | owner: {task['owner']}{needs} | phase: {task['phase']}{context}{epic}")
+        if task.get("context"):
+            rev = f"@r{task['context_revision']}" if task.get("context_revision") is not None else ""
+            context = f" | context: {task['context']}{rev}"
+        else:
+            context = ""
+        if task.get("epic"):
+            epic_rev = f"@r{task['epic_revision']}" if task.get("epic_revision") is not None else ""
+            epic = f" | epic: {task['epic']}{epic_rev}"
+        else:
+            epic = ""
+        base = f" | base: {task['base_commit'][:7]}" if task.get("base_commit") else ""
+        depends_on = f" | depends_on: {','.join(task['depends_on'])}" if task.get("depends_on") else ""
+        lines.append(f"- [{status_mark}] {task['id']} {task['title']} | owner: {task['owner']}{needs} | phase: {task['phase']}{context}{epic}{base}{depends_on}")
         for criterion in task["acceptance"]:
             lines.append(f"  - Accept: {criterion}")
         lines.append(f"  - Status: {task['status']}")
@@ -447,9 +555,14 @@ def cmd_add_task(args: argparse.Namespace) -> dict:
     task_ids = task_map(state)
     if args.id in task_ids:
         raise EngineError(f"task already exists: {args.id}")
-    if not args.acceptance:
+    acceptance = _flatten_repeated(args.acceptance)
+    if not acceptance:
         raise EngineError("add-task requires at least one --acceptance criterion")
-    task = {"id": args.id, "title": args.title, "owner": args.owner, "phase": args.phase, "needs": args.needs or [], "status": "todo", "acceptance": args.acceptance, "files": args.files or [], "tags": args.tags or [], "attempts": 0, "evidence": [], "blocked_reason": None, "claimed_by": None, "context": getattr(args, "context", None), "epic": getattr(args, "epic", None)}
+    context = getattr(args, "context", None)
+    context_revision = _context_revision(context)
+    epic = getattr(args, "epic", None)
+    depends_on = args.depends_on or []
+    task = {"id": args.id, "title": args.title, "owner": args.owner, "phase": args.phase, "needs": args.needs or [], "status": "todo", "acceptance": acceptance, "files": args.files or [], "tags": args.tags or [], "attempts": 0, "evidence": [], "blocked_reason": None, "claimed_by": None, "context": context, "epic": epic, "base_commit": _git_head(), "context_revision": context_revision, "epic_revision": _epic_revision(epic), "depends_on": depends_on, "contract_hashes": _contract_hashes(depends_on)}
     state["tasks"].append(task)
     validate(state)
     sync_phases(state)
@@ -464,12 +577,13 @@ def cmd_update_task(args: argparse.Namespace) -> dict:
     task = task_map(state).get(args.id)
     if not task:
         raise EngineError(f"unknown task: {args.id}")
-    if not args.add_acceptance and not args.add_files and not args.add_tags:
+    add_acceptance = _flatten_repeated(args.add_acceptance)
+    if not add_acceptance and not args.add_files and not args.add_tags:
         raise EngineError("update-task requires at least one of --add-acceptance, --add-files, --add-tags")
     detail_parts = []
-    if args.add_acceptance:
-        task["acceptance"].extend(args.add_acceptance)
-        detail_parts.append("acceptance: " + "; ".join(args.add_acceptance))
+    if add_acceptance:
+        task["acceptance"].extend(add_acceptance)
+        detail_parts.append("acceptance: " + "; ".join(add_acceptance))
     if args.add_files:
         task["files"].extend(f for f in args.add_files if f not in task["files"])
         detail_parts.append("files: " + ", ".join(args.add_files))
@@ -520,7 +634,7 @@ def cmd_transition(args: argparse.Namespace) -> dict:
     old = task["status"]; task["status"] = target
     if args.action in {"block", "reject"}:
         task["blocked_reason"] = args.detail
-    elif args.action == "start":
+    elif args.action in {"start", "unblock"}:
         task["blocked_reason"] = None
     if args.evidence:
         task["evidence"].extend(args.evidence)
@@ -565,14 +679,20 @@ def cmd_plan(args: argparse.Namespace) -> dict:
     if path.exists() and not args.force:
         raise EngineError(f"state already exists: {path}; use --force to replace")
     state = new_state(args.idea, args.workflow)
-    plan_task = {"id": "T1", "title": "Confirm scope and plan: " + args.idea, "owner": "planner", "phase": "plan", "needs": [], "status": "todo", "acceptance": ["Scope, exclusions, risks, and acceptance criteria confirmed"], "files": [".ai-work/roadmap/roadmap.md", ".ai-work/plan/plan.md", ".ai-work/tasks/tasks.md"], "tags": ["planning"], "attempts": 0, "evidence": [], "blocked_reason": None, "claimed_by": None}
-    build_task = {"id": "T2", "title": args.idea, "owner": args.owner, "phase": args.phase, "needs": ["T1"], "status": "todo", "acceptance": args.acceptance, "files": args.files or [], "tags": args.tags or [], "attempts": 0, "evidence": [], "blocked_reason": None, "claimed_by": None, "context": getattr(args, "context", None), "epic": getattr(args, "epic", None)}
+    base_commit = _git_head()
+    context = getattr(args, "context", None)
+    epic = getattr(args, "epic", None)
+    depends_on = args.depends_on or []
+    contract_hashes = _contract_hashes(depends_on)
+    acceptance = _flatten_repeated(args.acceptance)
+    plan_task = {"id": "T1", "title": "Confirm scope and plan: " + args.idea, "owner": "planner", "phase": "plan", "needs": [], "status": "todo", "acceptance": ["Scope, exclusions, risks, and acceptance criteria confirmed"], "files": [".ai-work/roadmap/roadmap.md", ".ai-work/plan/plan.md", ".ai-work/tasks/tasks.md"], "tags": ["planning"], "attempts": 0, "evidence": [], "blocked_reason": None, "claimed_by": None, "base_commit": base_commit, "context_revision": None, "epic_revision": None, "depends_on": [], "contract_hashes": {}}
+    build_task = {"id": "T2", "title": args.idea, "owner": args.owner, "phase": args.phase, "needs": ["T1"], "status": "todo", "acceptance": acceptance, "files": args.files or [], "tags": args.tags or [], "attempts": 0, "evidence": [], "blocked_reason": None, "claimed_by": None, "context": context, "epic": epic, "base_commit": base_commit, "context_revision": _context_revision(context), "epic_revision": _epic_revision(epic), "depends_on": depends_on, "contract_hashes": contract_hashes}
     state["tasks"] = [plan_task, build_task]; validate(state); sync_phases(state)
     root = workspace(path)
     root.joinpath("roadmap").mkdir(parents=True, exist_ok=True); root.joinpath("plan").mkdir(parents=True, exist_ok=True); root.joinpath("tasks").mkdir(parents=True, exist_ok=True)
     root.joinpath("roadmap/roadmap.md").write_text(f"# Roadmap\n\nGoal: {args.idea}\n\n1. Confirm scope, risks, and acceptance criteria.\n2. Implement in phase `{args.phase}` and verify evidence.\n", encoding="utf-8")
     root.joinpath("plan/plan.md").write_text(f"# Plan\n\nGoal: {args.idea}\n\nScope: {args.scope or 'pending Planner confirmation'}\nOut of scope: {args.out_of_scope or 'none recorded'}\nRisks: {', '.join(args.risks or ['none recorded'])}\nAssumptions: {args.assumptions or 'none recorded'}\nTags: {', '.join(args.tags or ['none'])}\n\nImplementation owner: {args.owner}\n", encoding="utf-8")
-    root.joinpath("tasks/tasks.md").write_text(f"# Tasks\n\n- [ ] T1 Confirm scope and plan | owner: planner | phase: plan\n- [ ] T2 {args.idea} | owner: {args.owner} | needs: T1 | phase: build\n  - Accept: " + "\n  - Accept: ".join(args.acceptance) + "\n", encoding="utf-8")
+    sync_tasks_md(state, path)
     event(state, path, "plan", None, args.actor, None, None, "idea converted to draft plan")
     save(state, path)
     return {"state": display_path(path), "workspace": display_path(root), "tasks": ["T1", "T2"], "assumptions": args.assumptions or "none recorded"}
@@ -603,20 +723,146 @@ def cmd_route(args: argparse.Namespace) -> dict:
 def cmd_context_add(args: argparse.Namespace) -> dict:
     path = ROOT / ".ai" / "contexts.yaml"
     contexts = _load_contexts()
-    if args.name in contexts:
-        raise EngineError(f"context already registered: {args.name}")
-    contexts[args.name] = {"path": args.path, "owner": args.owner}
+    if args.name in contexts and not args.force:
+        raise EngineError(f"context already registered: {args.name}; use --force to update it (bumps revision)")
+    # revision increments on every update so tasks recorded against a stale
+    # context (a moved/renamed path glob, a changed owner) can be detected.
+    revision = int(contexts[args.name].get("revision", 1)) + 1 if args.name in contexts else 1
+    contexts[args.name] = {"path": args.path, "owner": args.owner, "revision": str(revision)}
     lines = ["contexts:"]
     for name, fields in sorted(contexts.items()):
         lines.append(f"  {name}:")
         lines.append(f"    path: {fields['path']}")
         lines.append(f"    owner: {fields['owner']}")
+        lines.append(f"    revision: {fields.get('revision', 1)}")
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    return {"name": args.name, "path": args.path, "owner": args.owner}
+    return {"name": args.name, "path": args.path, "owner": args.owner, "revision": revision}
 
 
 def cmd_context_list(args: argparse.Namespace) -> dict:
     return _load_contexts()
+
+
+def cmd_epic_add(args: argparse.Namespace) -> dict:
+    """Register (or, with --force, re-register) an epic's Specification doc.
+
+    Mirrors cmd_context_add: revision starts at 1 and bumps on every --force
+    update, so tasks planned against an older spec revision become
+    detectable as stale via `ai-kit drift`. Registration is optional — `epic`
+    still works as a free-form tag with no entry here.
+    """
+    path = ROOT / ".ai" / "epics.yaml"
+    epics = _load_epics()
+    if args.name in epics and not args.force:
+        raise EngineError(f"epic already registered: {args.name}; use --force to update it (bumps revision)")
+    revision = int(epics[args.name].get("revision", 1)) + 1 if args.name in epics else 1
+    epics[args.name] = {"spec": args.spec, "owner": args.owner or "", "revision": str(revision)}
+    lines = ["epics:"]
+    for name, fields in sorted(epics.items()):
+        lines.append(f"  {name}:")
+        lines.append(f"    spec: {fields['spec']}")
+        if fields.get("owner"):
+            lines.append(f"    owner: {fields['owner']}")
+        lines.append(f"    revision: {fields.get('revision', 1)}")
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return {"name": args.name, "spec": args.spec, "owner": args.owner, "revision": revision}
+
+
+def cmd_epic_list(args: argparse.Namespace) -> dict:
+    return _load_epics()
+
+
+def _drift_flags(task: dict) -> dict:
+    """Compute read-time drift signals without mutating workflow state.
+
+    Missing contract files remain ``contract-stale`` for compatibility. A
+    path that exists but cannot be read is reported as unavailable instead.
+    The same result is consumed by both ``drift`` and ``board``.
+    """
+    contract_stale = []
+    drift_unavailable = []
+    for path in task.get("depends_on", []):
+        file_path = _contract_path(path)
+        recorded = task.get("contract_hashes", {}).get(path)
+        if not file_path.exists():
+            current = None
+        else:
+            try:
+                current = hashlib.sha256(file_path.read_bytes()).hexdigest()
+            except OSError:
+                drift_unavailable.append(path)
+                continue
+        if recorded != current:
+            contract_stale.append(path)
+
+    context_stale = False
+    context = task.get("context")
+    if context:
+        planned = task.get("context_revision")
+        current = _context_revision(context)
+        context_stale = planned is not None and current is not None and current != planned
+
+    epic_stale = False
+    epic = task.get("epic")
+    if epic:
+        planned = task.get("epic_revision")
+        current = _epic_revision(epic)
+        epic_stale = planned is not None and current is not None and current != planned
+
+    return {
+        "context_stale": context_stale,
+        "epic_stale": epic_stale,
+        "contract_stale": contract_stale,
+        "drift_unavailable": drift_unavailable,
+    }
+
+
+def cmd_drift(args: argparse.Namespace) -> dict:
+    """Report whether a task's plan-time base_commit/context_revision are stale.
+
+    Informational only, never blocks a transition — blueprints and contracts
+    change legitimately during development. Use this before dispatch/review
+    to decide whether a task needs a re-plan.
+    """
+    import subprocess as _sp
+    state = load(state_path(args.state)); validate(state)
+    task = task_map(state).get(args.id)
+    if not task:
+        raise EngineError(f"unknown task: {args.id}")
+    report: dict = {"task": task["id"]}
+    flags = _drift_flags(task)
+    contract_stale = flags["contract_stale"]
+    report["contract_stale"] = contract_stale
+    report["drift_unavailable"] = flags["drift_unavailable"]
+
+    base_commit = task.get("base_commit")
+    report["base_commit"] = base_commit
+    if base_commit:
+        head = _git_head()
+        report["current_head"] = head
+        report["commits_since_base"] = bool(head and head != base_commit)
+        if head and head != base_commit:
+            result = _sp.run(["git", "-C", str(ROOT), "diff", "--name-only", base_commit, head], capture_output=True, text=True)
+            report["files_changed_since_base"] = [f for f in result.stdout.splitlines() if f]
+
+    ctx_name = task.get("context")
+    if ctx_name:
+        current_revision = _context_revision(ctx_name)
+        planned_revision = task.get("context_revision")
+        report["context"] = ctx_name
+        report["context_revision_at_plan"] = planned_revision
+        report["context_revision_current"] = current_revision
+        report["context_stale"] = flags["context_stale"]
+
+    epic_name = task.get("epic")
+    if epic_name:
+        current_epic_revision = _epic_revision(epic_name)
+        planned_epic_revision = task.get("epic_revision")
+        report["epic"] = epic_name
+        report["epic_revision_at_plan"] = planned_epic_revision
+        report["epic_revision_current"] = current_epic_revision
+        report["epic_stale"] = flags["epic_stale"]
+    return report
 
 
 def cmd_epics(args: argparse.Namespace) -> list:
@@ -651,6 +897,79 @@ def cmd_status(args: argparse.Namespace) -> dict:
     if context: result["context"] = context
     if epic: result["epic"] = epic
     return result
+
+
+def _board_entry(task: dict) -> dict:
+    drift = _drift_flags(task)
+    flags = []
+    if task["status"] == "blocked":
+        flags.append("blocked")
+    if drift["context_stale"]:
+        flags.append("context-stale")
+    if drift["epic_stale"]:
+        flags.append("epic-stale")
+    if drift["contract_stale"]:
+        flags.append("contract-stale")
+    if drift["drift_unavailable"]:
+        flags.append("drift-unavailable")
+    entry = {
+        "id": task["id"],
+        "title": task["title"],
+        "owner_display": task.get("claimed_by") or task["owner"],
+        "context": task.get("context"),
+        "epic": task.get("epic"),
+        "flags": flags,
+    }
+    if task["status"] == "blocked":
+        entry["blocked_reason"] = task.get("blocked_reason")
+    return entry
+
+
+def _render_board_markdown(board: dict) -> str:
+    lines = ["# AI Planner Board", ""]
+    for status in STATUSES:
+        entries = board[status]
+        if not entries:
+            continue
+        lines.extend([f"## {status}", ""])
+        for entry in entries:
+            details = [f"owner: {entry['owner_display']}"]
+            if entry["context"]:
+                details.append(f"context: {entry['context']}")
+            if entry["epic"]:
+                details.append(f"epic: {entry['epic']}")
+            if entry["flags"]:
+                details.append(f"flags: {', '.join(entry['flags'])}")
+            if "blocked_reason" in entry:
+                details.append(f"blocked_reason: {entry['blocked_reason'] or ''}")
+            lines.append(f"- **{entry['id']}** {entry['title']} ({'; '.join(details)})")
+        lines.append("")
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def cmd_board(args: argparse.Namespace) -> dict | str:
+    state_path_value = state_path(args.state)
+    state = load(state_path_value); validate(state)
+    context = getattr(args, "context", None)
+    epic = getattr(args, "epic", None)
+    owner = getattr(args, "owner", None)
+    scoped = [
+        task for task in state["tasks"]
+        if (not context or task.get("context") == context)
+        and (not epic or task.get("epic") == epic)
+        and (not owner or task.get("owner") == owner)
+    ]
+    board = {status: [] for status in STATUSES}
+    for task in scoped:
+        board[task["status"]].append(_board_entry(task))
+    markdown = _render_board_markdown(board)
+    if args.write:
+        output_path = workspace(state_path_value) / "board.md"
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(markdown, encoding="utf-8")
+    if args.format == "markdown":
+        return markdown
+    return board
 
 
 def cmd_timeline(args: argparse.Namespace) -> list:
@@ -851,10 +1170,10 @@ def parser() -> argparse.ArgumentParser:
     root.add_argument("--json", action="store_true", help="always print JSON")
     sub = root.add_subparsers(dest="command", required=True)
     init = sub.add_parser("init"); init.add_argument("--title", required=True); init.add_argument("--workflow", required=True); init.add_argument("--actor", default="planner"); init.add_argument("--force", action="store_true"); init.set_defaults(fn=cmd_init)
-    add = sub.add_parser("add-task"); add.add_argument("id"); add.add_argument("--title", required=True); add.add_argument("--owner", required=True); add.add_argument("--phase", required=True); add.add_argument("--needs", nargs="*"); add.add_argument("--acceptance", nargs="+", required=True); add.add_argument("--files", nargs="*"); add.add_argument("--tags", nargs="*"); add.add_argument("--context"); add.add_argument("--epic"); add.add_argument("--actor", default="planner"); add.set_defaults(fn=cmd_add_task)
-    update = sub.add_parser("update-task"); update.add_argument("id"); update.add_argument("--add-acceptance", nargs="+"); update.add_argument("--add-files", nargs="*"); update.add_argument("--add-tags", nargs="*"); update.add_argument("--actor", default="planner"); update.set_defaults(fn=cmd_update_task)
+    add = sub.add_parser("add-task"); add.add_argument("id"); add.add_argument("--title", required=True); add.add_argument("--owner", required=True); add.add_argument("--phase", required=True); add.add_argument("--needs", nargs="*"); add.add_argument("--depends-on", action="append", default=[], metavar="PATH"); add.add_argument("--acceptance", nargs="+", action="append", required=True); add.add_argument("--files", nargs="*"); add.add_argument("--tags", nargs="*"); add.add_argument("--context"); add.add_argument("--epic"); add.add_argument("--actor", default="planner"); add.set_defaults(fn=cmd_add_task)
+    update = sub.add_parser("update-task"); update.add_argument("id"); update.add_argument("--add-acceptance", nargs="+", action="append"); update.add_argument("--add-files", nargs="*"); update.add_argument("--add-tags", nargs="*"); update.add_argument("--actor", default="planner"); update.set_defaults(fn=cmd_update_task)
     ready = sub.add_parser("ready"); ready.add_argument("--context"); ready.add_argument("--epic"); ready.set_defaults(fn=cmd_ready)
-    plan = sub.add_parser("plan"); plan.add_argument("--idea", required=True); plan.add_argument("--workflow", default="feature"); plan.add_argument("--owner", required=True); plan.add_argument("--acceptance", nargs="+", required=True); plan.add_argument("--files", nargs="*"); plan.add_argument("--tags", nargs="*"); plan.add_argument("--phase", default="build"); plan.add_argument("--context"); plan.add_argument("--epic"); plan.add_argument("--scope"); plan.add_argument("--out-of-scope"); plan.add_argument("--risks", nargs="*"); plan.add_argument("--assumptions"); plan.add_argument("--actor", default="planner"); plan.add_argument("--force", action="store_true"); plan.set_defaults(fn=cmd_plan)
+    plan = sub.add_parser("plan"); plan.add_argument("--idea", required=True); plan.add_argument("--workflow", default="feature"); plan.add_argument("--owner", required=True); plan.add_argument("--acceptance", nargs="+", action="append", required=True); plan.add_argument("--files", nargs="*"); plan.add_argument("--tags", nargs="*"); plan.add_argument("--phase", default="build"); plan.add_argument("--context"); plan.add_argument("--epic"); plan.add_argument("--depends-on", action="append", default=[], metavar="PATH"); plan.add_argument("--scope"); plan.add_argument("--out-of-scope"); plan.add_argument("--risks", nargs="*"); plan.add_argument("--assumptions"); plan.add_argument("--actor", default="planner"); plan.add_argument("--force", action="store_true"); plan.set_defaults(fn=cmd_plan)
     trans = sub.add_parser("transition"); trans.add_argument("id"); trans.add_argument("action", choices=TRANSITIONS); trans.add_argument("--actor", required=True); trans.add_argument("--detail"); trans.add_argument("--evidence", nargs="+"); trans.add_argument("--expected-revision", type=int); trans.add_argument("--agent-id", help="unique identity of the agent instance, appended to claimed_by as 'actor#agent_id' for audit when multiple agents share a role"); trans.set_defaults(fn=cmd_transition)
     approve = sub.add_parser("approve"); approve.add_argument("id"); approve.add_argument("--role", choices=["qa", "review"], required=True); approve.add_argument("--status"); approve.add_argument("--reason", required=True); approve.set_defaults(fn=cmd_approve)
     verify = sub.add_parser("verify"); verify.add_argument("id"); verify.set_defaults(fn=cmd_verify)
@@ -865,10 +1184,15 @@ def parser() -> argparse.ArgumentParser:
     timeline = sub.add_parser("timeline"); timeline.set_defaults(fn=cmd_timeline)
     blocked = sub.add_parser("blocked"); blocked.set_defaults(fn=cmd_blocked)
     graph = sub.add_parser("graph"); graph.add_argument("--context"); graph.set_defaults(fn=cmd_graph)
+    board = sub.add_parser("board"); board.add_argument("--context"); board.add_argument("--epic"); board.add_argument("--owner"); board.add_argument("--write", action="store_true"); board.add_argument("--format", choices=["json", "markdown"], default="json"); board.set_defaults(fn=cmd_board)
     context = sub.add_parser("context"); context_sub = context.add_subparsers(dest="context_command", required=True)
-    context_add = context_sub.add_parser("add"); context_add.add_argument("name"); context_add.add_argument("--path", required=True); context_add.add_argument("--owner", required=True); context_add.set_defaults(fn=cmd_context_add)
+    context_add = context_sub.add_parser("add"); context_add.add_argument("name"); context_add.add_argument("--path", required=True); context_add.add_argument("--owner", required=True); context_add.add_argument("--force", action="store_true", help="update an existing context, bumping its revision"); context_add.set_defaults(fn=cmd_context_add)
     context_list = context_sub.add_parser("list"); context_list.set_defaults(fn=cmd_context_list)
     epics = sub.add_parser("epics"); epics.set_defaults(fn=cmd_epics)
+    epic = sub.add_parser("epic"); epic_sub = epic.add_subparsers(dest="epic_command", required=True)
+    epic_add = epic_sub.add_parser("add"); epic_add.add_argument("name"); epic_add.add_argument("--spec", required=True, help="path to the epic's Specification doc"); epic_add.add_argument("--owner"); epic_add.add_argument("--force", action="store_true", help="update an existing epic's spec, bumping its revision"); epic_add.set_defaults(fn=cmd_epic_add)
+    epic_list = epic_sub.add_parser("list"); epic_list.set_defaults(fn=cmd_epic_list)
+    drift = sub.add_parser("drift"); drift.add_argument("id"); drift.set_defaults(fn=cmd_drift)
     onboard = sub.add_parser("onboard"); onboard.add_argument("--apply", action="store_true"); onboard.set_defaults(fn=cmd_onboard)
     show = sub.add_parser("show"); show.set_defaults(fn=cmd_show)
     valid = sub.add_parser("validate"); valid.set_defaults(fn=lambda args: (validate(load(state_path(args.state))) or {"valid": True}))
@@ -879,7 +1203,7 @@ def main() -> int:
     args = parser().parse_args()
     try:
         output = args.fn(args)
-        print(json.dumps(output, indent=2))
+        print(output if isinstance(output, str) else json.dumps(output, indent=2))
         return 0
     except EngineError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
