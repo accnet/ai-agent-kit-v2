@@ -138,8 +138,33 @@ workers) remain distinguishable in the audit trail. `dispatch-ready
 ready tasks (auto-generating a unique `agent_id` per task if none is given)
 and spawns each task's runner as a detached background process, so N
 claimed tasks execute concurrently rather than one dispatch call blocking
-the next.
+the next. Each spawned child's stdout/stderr is redirected to its own
+`.ai-work/logs/dispatch_<task-id>.log` rather than inherited from the parent
+process — an inherited fd stays open until every child also exits, which
+would hang or corrupt output for a caller piping `dispatch-ready`'s own
+stdout. Each `spawned` entry in the response includes that log's path.
 
 `.ai-work/state/current.json` is a derived startup pointer maintained by State
 Manager. It identifies the canonical workflow state and currently active tasks;
 it is never an independent source of lifecycle truth.
+
+## Runner registry
+
+`.ai/runners.yaml` is the versioned runner registry. Each entry requires a
+`command` template containing `{prompt}` and may include `model`, `provider`,
+and `description`. A top-level `default_executor: <name>` scalar names the
+single runner `dispatch-ready` is allowed to run automatically.
+`ai-kit runner add [--default]` and `ai-kit runner list` manage the
+registry; `runner list` returns `{"default_executor": <name-or-null>,
+"runners": {...}}`.
+
+`--runner` is optional on both `dispatch` and `dispatch-ready`, falling back
+to the configured `default_executor` when omitted. An explicit
+`ai-kit dispatch <id> --runner X` is permitted for any registered runner and
+records its model/provider in `dispatch_log_<id>.json`.
+`ai-kit dispatch-ready [--runner X]` is the automatic safety-sensitive path:
+it only ever runs the configured `default_executor` — an explicit `--runner
+X` that names a different runner is an `EngineError` raised before claiming
+any task, pointing at explicit `dispatch` as the alternative. A missing or
+misconfigured `default_executor` (unset, or naming a runner that isn't
+registered) also fails before claiming any task.

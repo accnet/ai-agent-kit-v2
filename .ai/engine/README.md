@@ -25,6 +25,8 @@ python .ai/engine/ai_kit.py transition T1 reject --actor qa --detail "Ceiling co
 python .ai/engine/ai_kit.py update-task T1 --add-acceptance "Bird hitting the ceiling ends the game" --actor qa
 python .ai/engine/ai_kit.py verify T1
 python .ai/engine/ai_kit.py context add ordering --path "src/ordering/*" --owner backend
+python .ai/engine/ai_kit.py runner add local --command 'true {prompt}' --description "Local test runner"
+python .ai/engine/ai_kit.py runner list
 python .ai/engine/ai_kit.py add-task T3 --title "Ship order API" --owner backend --phase build --acceptance "..." --context ordering --epic checkout-revamp
 python .ai/engine/ai_kit.py add-task T4 --title "Read API contract" --owner backend --phase build --acceptance "..." --depends-on .ai/engine/state-schema.md --depends-on .ai/engine/README.md
 python .ai/engine/ai_kit.py epics
@@ -56,6 +58,20 @@ security gate ran and functional correctness was never actually checked.
 commands. Use `onboard --apply` only after reviewing the output; it backs up
 `.ai/kit.yaml` before updating it. A custom `--state /path/name.json` uses
 `/path/name/` as its isolated artifact and audit workspace.
+
+Runner profiles live in `.ai/runners.yaml`. Each profile has a required
+`command` template and optional `model`, `provider`, and `description`
+fields. A top-level `default_executor: <name>` scalar names the one profile
+`dispatch-ready` is allowed to run automatically. `runner add` refuses to
+overwrite an existing profile unless `--force` is supplied; `--default` sets
+(overwrites) `default_executor` to the profile being added. `runner list`
+returns `{"default_executor": ..., "runners": {...}}`.
+`--runner` is optional on both `dispatch` and `dispatch-ready`, falling back
+to `default_executor` when omitted. Explicit `dispatch <id> --runner X`
+always runs any named profile. `dispatch-ready` only ever runs the
+configured `default_executor` — passing `--runner X` where `X` differs from
+it is an error, checked before claiming any task. Use explicit `dispatch`
+to run a profile that isn't the default.
 
 `context` (registered via `.ai/contexts.yaml`) scopes tasks to a service or
 bounded context (`api`, `ui`, `database`, ...); `--context` filters

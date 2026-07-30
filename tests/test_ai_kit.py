@@ -3,6 +3,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -211,6 +212,108 @@ class AiKitCliTests(unittest.TestCase):
 
         self.addCleanup(restore)
         return path
+
+    def _preserve_runner_registry(self):
+        return self._preserve_repo_file(".ai/runners.yaml")
+
+    def test_runner_add_list_round_trip_and_force_update(self):
+        self._preserve_runner_registry()
+        self.run_cli(
+            "runner", "add", "test-runner", "--command", " true # {prompt} ",
+            "--model", "model-a", "--provider", "provider-a",
+            "--description", "keeps # and spaces", "--default",
+        )
+        listed = json.loads(self.run_cli("runner", "list").stdout)
+        self.assertEqual(listed["default_executor"], "test-runner")
+        self.assertEqual(listed["runners"]["test-runner"]["command"], " true # {prompt} ")
+
+        self.run_cli("runner", "add", "test-runner", "--command", "updated {prompt}", "--force")
+        updated = json.loads(self.run_cli("runner", "list").stdout)
+        # --force without --default preserves the existing default_executor.
+        self.assertEqual(updated["default_executor"], "test-runner")
+        self.assertEqual(updated["runners"]["test-runner"]["command"], "updated {prompt}")
+
+    def test_dispatch_records_runner_model_and_provider(self):
+        self._preserve_runner_registry()
+        self.run_cli("runner", "add", "harmless", "--command", "true {prompt}", "--model", "m1", "--provider", "p1")
+        self.init()
+        self.add_task("T1")
+        self.run_cli("dispatch", "T1", "--runner", "harmless")
+        audit = json.loads((self.root / "dispatch_log_T1.json").read_text())
+        self.assertEqual(audit["model"], "m1")
+        self.assertEqual(audit["provider"], "p1")
+        self.assertEqual(self.read_state()["tasks"][0]["status"], "in-progress")
+
+    def test_dispatch_falls_back_to_default_executor_when_runner_omitted(self):
+        self._preserve_runner_registry()
+        self.run_cli("runner", "add", "fallback-runner", "--command", "true {prompt}", "--default")
+        self.init()
+        self.add_task("T1")
+        result = json.loads(self.run_cli("dispatch", "T1").stdout)
+        self.assertEqual(result["runner"], "fallback-runner")
+        self.assertEqual(self.read_state()["tasks"][0]["status"], "in-progress")
+
+    def test_dispatch_requires_runner_or_default_executor(self):
+        registry_path = self._preserve_runner_registry()
+        registry_path.write_text("runners: {}\n", encoding="utf-8")
+        self.init()
+        self.add_task("T1")
+        refused = self.run_cli("dispatch", "T1", check=False)
+        self.assertEqual(refused.returncode, 2)
+        self.assertIn("default_executor", refused.stderr)
+        self.assertEqual(self.read_state()["tasks"][0]["status"], "todo")
+
+    def test_dispatch_ready_requires_matching_default_executor(self):
+        registry_path = self._preserve_runner_registry()
+        registry_path.write_text('runners:\n  manual:\n    command: "true {prompt}"\n', encoding="utf-8")
+        self.init()
+        self.add_task("T1")
+
+        # No default_executor configured at all yet.
+        refused = self.run_cli("dispatch-ready", check=False)
+        self.assertEqual(refused.returncode, 2)
+        self.assertIn("default_executor", refused.stderr)
+        self.assertEqual(self.read_state()["tasks"][0]["status"], "todo")
+
+        # --runner naming a registered runner that isn't the default_executor is refused too.
+        mismatched = self.run_cli("dispatch-ready", "--runner", "manual", check=False)
+        self.assertEqual(mismatched.returncode, 2)
+        self.assertIn("default_executor", mismatched.stderr)
+        self.assertEqual(self.read_state()["tasks"][0]["status"], "todo")
+
+        unknown = self.run_cli("dispatch-ready", "--runner", "missing", check=False)
+        self.assertEqual(unknown.returncode, 2)
+        self.assertEqual(self.read_state()["tasks"][0]["status"], "todo")
+
+    def test_dispatch_ready_claims_and_spawns_default_executor(self):
+        self._preserve_runner_registry()
+        self.run_cli("runner", "add", "automatic", "--command", "true {prompt}", "--default")
+        self.init()
+        self.add_task("T1")
+        result = json.loads(self.run_cli("dispatch-ready").stdout)
+        self.assertEqual(result["runner"], "automatic")
+        self.assertEqual(result["claimed"], 1)
+        self.assertEqual(len(result["spawned"]), 1)
+        self.assertEqual(self.read_state()["tasks"][0]["status"], "in-progress")
+
+    def test_dispatch_ready_spawned_process_honors_custom_state_path(self):
+        # Regression: the spawned "dispatch" subprocess must receive --state
+        # BEFORE the "dispatch" subcommand token (argparse only accepts it on
+        # the root parser), or the child silently fails and never writes the
+        # per-task dispatch_log audit file into this custom workspace.
+        self._preserve_runner_registry()
+        self.run_cli("runner", "add", "automatic", "--command", "true {prompt}", "--default")
+        self.init()
+        self.add_task("T1")
+        self.run_cli("dispatch-ready")
+        audit_path = self.root / "dispatch_log_T1.json"
+        deadline = time.monotonic() + 5
+        while not audit_path.exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        self.assertTrue(audit_path.exists(), "spawned dispatch never wrote its audit log")
+        audit = json.loads(audit_path.read_text())
+        self.assertEqual(audit["task"], "T1")
+        self.assertEqual(audit["exit_code"], 0)
 
     def test_context_drift_is_reported_only_after_forced_update(self):
         self._preserve_repo_file(".ai/contexts.yaml")

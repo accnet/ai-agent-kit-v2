@@ -4,6 +4,18 @@
 
 ### Added
 
+- Structured runner registry: `.ai/runners.json` is replaced by
+  `.ai/runners.yaml`, with `command`, optional `model`/`provider`/`description`,
+  and a top-level `default_executor: <name>` scalar naming the single runner
+  `dispatch-ready` is allowed to run automatically. Added `ai-kit runner add
+  [--default]` and `runner list` (now returns `{"default_executor": ...,
+  "runners": {...}}`). `--runner` is optional on `dispatch`/`dispatch-ready`,
+  falling back to `default_executor` when omitted. Explicit `dispatch`
+  remains available for any named runner, while `dispatch-ready` only ever
+  runs the configured `default_executor` — an explicit `--runner` naming a
+  different runner is an error raised before claiming any task; this is an
+  intentional breaking-by-design safety change.
+
 - Local engine test suite: `.ai/scripts/test-kit.sh` runs
   `tests/test_ai_kit.py` (stdlib `unittest`, no third-party deps), which
   drives the CLI as a subprocess against isolated tempfile-based `--state`
@@ -75,6 +87,13 @@
 
 ### Fixed
 
+- `dispatch-ready`: the spawned `dispatch` subprocess appended `--state` after
+  the `dispatch` subcommand token instead of before it, so argparse (which
+  only accepts `--state` on the root parser) silently rejected it whenever
+  `dispatch-ready` was run with a non-default `--state` — every fanned-out
+  task's runner process failed immediately and never produced its
+  `dispatch_log_<id>.json` audit file, though the parent call still reported
+  a successful claim/spawn.
 - `--acceptance` (`add-task`/`plan`) and `--add-acceptance` (`update-task`)
   now accumulate across repeated flag occurrences instead of the last
   occurrence silently overwriting the previous ones (`argparse`'s `nargs="+"`

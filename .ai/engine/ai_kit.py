@@ -75,7 +75,16 @@ def _load_yaml_registry(relative_path: str, top_key: str) -> dict:
             continue
         field_match = re.match(r"^    (\w+):\s*(.+)$", line)
         if field_match and current:
-            entries[current][field_match.group(1)] = field_match.group(2).strip()
+            value = field_match.group(2).strip()
+            # Registry writers use JSON double-quoted scalars when a value may
+            # contain YAML-significant characters (or intentional whitespace).
+            # JSON is a strict, dependency-free subset for these scalar values.
+            if value.startswith('"'):
+                try:
+                    value = json.loads(value)
+                except json.JSONDecodeError:
+                    pass
+            entries[current][field_match.group(1)] = value
     return entries
 
 
@@ -107,6 +116,73 @@ def _load_epics() -> dict:
     `epic_revision` drift tracking (see `_epic_revision`, `cmd_drift`).
     """
     return _load_yaml_registry(".ai/epics.yaml", "epics")
+
+
+def _load_runners() -> dict:
+    """Load runner profiles from the structured YAML registry."""
+    return _load_yaml_registry(".ai/runners.yaml", "runners")
+
+
+def _runner_scalar(value: str) -> str:
+    """Serialize a runner field without losing spaces, quotes, or ``#``."""
+    return json.dumps(value, ensure_ascii=False)
+
+
+def _default_executor() -> str | None:
+    """Read the top-level `default_executor: <name>` scalar from .ai/runners.yaml, or None if unset."""
+    path = ROOT / ".ai" / "runners.yaml"
+    if not path.exists():
+        return None
+    prefix = "default_executor:"
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if line.startswith(prefix):
+            value = line[len(prefix):].strip()
+            if value.startswith('"'):
+                try:
+                    value = json.loads(value)
+                except json.JSONDecodeError:
+                    pass
+            return value or None
+    return None
+
+
+def _resolve_runner(explicit: str | None) -> tuple[str, dict]:
+    """Resolve an explicit --runner, or fall back to the configured default_executor.
+
+    Returns (name, entry). Raises EngineError if neither an explicit runner
+    nor a configured default_executor is available, if the configured
+    default_executor doesn't name a registered runner (misconfiguration), or
+    if the resolved name isn't registered.
+    """
+    runners = _load_runners()
+    default_executor = _default_executor()
+    if default_executor and default_executor not in runners:
+        raise EngineError(f"configured default_executor '{default_executor}' is not a registered runner in .ai/runners.yaml")
+    name = explicit or default_executor
+    if not name:
+        raise EngineError(
+            "no --runner given and no default_executor configured in .ai/runners.yaml; "
+            "pass --runner explicitly or set one via 'ai-kit runner add <name> --default'"
+        )
+    if name not in runners:
+        raise EngineError(f"unknown runner profile: {name}. Available: {', '.join(runners.keys())}")
+    return name, runners[name]
+
+
+def _write_runners(runners: dict[str, dict], default_executor: str | None) -> None:
+    path = ROOT / ".ai" / "runners.yaml"
+    lines = []
+    if default_executor:
+        lines.append(f"default_executor: {_runner_scalar(default_executor)}")
+        lines.append("")
+    lines.append("runners:")
+    for name, fields in sorted(runners.items()):
+        lines.append(f"  {name}:")
+        lines.append(f"    command: {_runner_scalar(fields['command'])}")
+        for key in ("model", "provider", "description"):
+            if fields.get(key) is not None and fields.get(key) != "":
+                lines.append(f"    {key}: {_runner_scalar(str(fields[key]))}")
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def _git_head() -> str | None:
@@ -743,6 +819,25 @@ def cmd_context_list(args: argparse.Namespace) -> dict:
     return _load_contexts()
 
 
+def cmd_runner_add(args: argparse.Namespace) -> dict:
+    runners = _load_runners()
+    if args.name in runners and not args.force:
+        raise EngineError(f"runner already registered: {args.name}; use --force to update it")
+    runners[args.name] = {
+        "command": args.command,
+        "model": args.model or "",
+        "provider": args.provider or "",
+        "description": args.description or "",
+    }
+    default_executor = args.name if args.default else _default_executor()
+    _write_runners(runners, default_executor)
+    return {"name": args.name, "default_executor": default_executor, **runners[args.name]}
+
+
+def cmd_runner_list(args: argparse.Namespace) -> dict:
+    return {"default_executor": _default_executor(), "runners": _load_runners()}
+
+
 def cmd_epic_add(args: argparse.Namespace) -> dict:
     """Register (or, with --force, re-register) an epic's Specification doc.
 
@@ -1042,33 +1137,35 @@ def cmd_dispatch(args: argparse.Namespace) -> dict:
     task = task_map(state).get(args.id)
     if not task:
         raise EngineError(f"unknown task: {args.id}")
-    runners_file = ROOT / ".ai" / "runners.json"
-    runners = json.loads(runners_file.read_text(encoding="utf-8")) if runners_file.exists() else {}
-    if args.runner not in runners:
-        raise EngineError(f"unknown runner profile: {args.runner}. Available: {', '.join(runners.keys())}")
-    template = runners[args.runner]
+    runner_name, runner = _resolve_runner(args.runner)
+    template = runner["command"]
     # The State Manager, not the runner, owns lifecycle transitions: claim the
     # task (todo -> in-progress) here so the runner only ever needs to report
     # completion, matching the single `complete` transition it is prompted for.
     if task["status"] == "todo":
-        start_args = argparse.Namespace(state=args.state, id=task["id"], action="start", actor=task["owner"], detail=f"auto-started for dispatch to runner '{args.runner}'", evidence=None, expected_revision=None, agent_id=getattr(args, "agent_id", None))
+        start_args = argparse.Namespace(state=args.state, id=task["id"], action="start", actor=task["owner"], detail=f"auto-started for dispatch to runner '{runner_name}'", evidence=None, expected_revision=None, agent_id=getattr(args, "agent_id", None))
         task = _retry_transition(start_args)
     elif task["status"] != "in-progress":
         raise EngineError(f"cannot dispatch {task['id']} from status {task['status']} (must be todo or in-progress)")
-    prompt = f"Bạn là {task['owner']}. Thực thi task {task['id']} theo yêu cầu trong .ai-work/tasks/tasks.md. Không vi phạm AGENTS.md. Xong việc gọi lệnh: bash .ai/scripts/ai-kit transition {task['id']} complete --actor {task['owner']} --detail 'Hoàn thành bởi {args.runner}'"
+    prompt = f"Bạn là {task['owner']}. Thực thi task {task['id']} theo yêu cầu trong .ai-work/tasks/tasks.md. Không vi phạm AGENTS.md. Xong việc gọi lệnh: bash .ai/scripts/ai-kit transition {task['id']} complete --actor {task['owner']} --detail 'Hoàn thành bởi {runner_name}'"
     # Runner templates hold {prompt} unquoted; shlex.quote is the single
     # place quoting happens, so a template can never double-quote it.
     cmd = template.replace("{prompt}", shlex.quote(prompt))
-    print(f"Dispatching task {task['id']} to runner '{args.runner}'...", file=sys.stderr)
+    print(f"Dispatching task {task['id']} to runner '{runner_name}'...", file=sys.stderr)
     result = _sp.run(cmd, shell=True, cwd=str(ROOT))
     # Audit log
-    audit = {"ts": now(), "task": task["id"], "runner": args.runner, "command": cmd, "exit_code": result.returncode}
+    audit = {
+        "ts": now(), "task": task["id"], "runner": runner_name,
+        "model": runner.get("model") or None,
+        "provider": runner.get("provider") or None,
+        "command": cmd, "exit_code": result.returncode,
+    }
     audit_path = workspace(state_path(args.state)) / f"dispatch_log_{task['id']}.json"
     audit_path.parent.mkdir(parents=True, exist_ok=True)
     audit_path.write_text(json.dumps(audit, indent=2) + "\n", encoding="utf-8")
     if result.returncode != 0:
-        raise EngineError(f"Runner {args.runner} exited with code {result.returncode}")
-    return {"task": task["id"], "runner": args.runner, "status": "dispatched"}
+        raise EngineError(f"Runner {runner_name} exited with code {result.returncode}")
+    return {"task": task["id"], "runner": runner_name, "status": "dispatched"}
 
 
 def cmd_dispatch_ready(args: argparse.Namespace) -> dict:
@@ -1082,6 +1179,23 @@ def cmd_dispatch_ready(args: argparse.Namespace) -> dict:
     """
     import subprocess as _sp
     state = load(state_path(args.state)); validate(state)
+    runners = _load_runners()
+    default_executor = _default_executor()
+    if not default_executor:
+        raise EngineError(
+            "no default_executor configured in .ai/runners.yaml; "
+            "set one via 'ai-kit runner add <name> --default', or use "
+            "'ai-kit dispatch <id> --runner <name>' for explicit dispatch"
+        )
+    if default_executor not in runners:
+        raise EngineError(f"configured default_executor '{default_executor}' is not a registered runner in .ai/runners.yaml")
+    if args.runner and args.runner != default_executor:
+        raise EngineError(
+            f"dispatch-ready only runs the configured default_executor ('{default_executor}'), "
+            f"not '{args.runner}'; use 'ai-kit dispatch <id> --runner {args.runner}' for explicit dispatch"
+        )
+    runner_name = default_executor
+    runner = runners[runner_name]
     tasks = task_map(state)
     candidates = [t for t in state["tasks"] if runnable(t, tasks)]
     if args.context:
@@ -1092,20 +1206,32 @@ def cmd_dispatch_ready(args: argparse.Namespace) -> dict:
     claimed = []
     for task in candidates[:limit]:
         agent_id = args.agent_id or uuid.uuid4().hex[:8]
-        start_args = argparse.Namespace(state=args.state, id=task["id"], action="start", actor=task["owner"], detail=f"auto-claimed by dispatch-ready for runner '{args.runner}'", evidence=None, expected_revision=None, agent_id=agent_id)
+        start_args = argparse.Namespace(state=args.state, id=task["id"], action="start", actor=task["owner"], detail=f"auto-claimed by dispatch-ready for runner '{runner_name}'", evidence=None, expected_revision=None, agent_id=agent_id)
         try:
             _retry_transition(start_args)
         except EngineError:
             continue  # lost the claim race, or no longer runnable; skip rather than substitute another task
         claimed.append({"task": task["id"], "agent_id": agent_id})
+    log_dir = workspace(state_path(args.state)) / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
     spawned = []
     for entry in claimed:
-        cmd = ["bash", str(ROOT / ".ai" / "scripts" / "ai-kit"), "dispatch", entry["task"], "--runner", args.runner, "--agent-id", entry["agent_id"]]
+        # --state is a root-parser option and must precede the "dispatch"
+        # subcommand token, or argparse's subparser rejects it as unrecognized.
+        cmd = ["bash", str(ROOT / ".ai" / "scripts" / "ai-kit")]
         if args.state:
             cmd += ["--state", args.state]
-        proc = _sp.Popen(cmd, cwd=str(ROOT))
-        spawned.append({"task": entry["task"], "agent_id": entry["agent_id"], "pid": proc.pid})
-    return {"runner": args.runner, "candidates": len(candidates), "claimed": len(claimed), "spawned": spawned}
+        cmd += ["dispatch", entry["task"], "--runner", runner_name, "--agent-id", entry["agent_id"]]
+        # Redirect the child's stdout/stderr to its own log file instead of
+        # inheriting this process's fds: an inherited pipe stays open (and a
+        # caller reading dispatch-ready's own output can hang or see
+        # interleaved/corrupted data) until every spawned child also exits,
+        # which defeats the point of a non-blocking fan-out.
+        log_path = log_dir / f"dispatch_{entry['task']}.log"
+        with log_path.open("w", encoding="utf-8") as log_handle:
+            proc = _sp.Popen(cmd, cwd=str(ROOT), stdout=log_handle, stderr=_sp.STDOUT, close_fds=True)
+        spawned.append({"task": entry["task"], "agent_id": entry["agent_id"], "pid": proc.pid, "log": display_path(log_path)})
+    return {"runner": runner_name, "candidates": len(candidates), "claimed": len(claimed), "spawned": spawned}
 
 
 def cmd_verify(args: argparse.Namespace) -> dict:
@@ -1177,8 +1303,8 @@ def parser() -> argparse.ArgumentParser:
     trans = sub.add_parser("transition"); trans.add_argument("id"); trans.add_argument("action", choices=TRANSITIONS); trans.add_argument("--actor", required=True); trans.add_argument("--detail"); trans.add_argument("--evidence", nargs="+"); trans.add_argument("--expected-revision", type=int); trans.add_argument("--agent-id", help="unique identity of the agent instance, appended to claimed_by as 'actor#agent_id' for audit when multiple agents share a role"); trans.set_defaults(fn=cmd_transition)
     approve = sub.add_parser("approve"); approve.add_argument("id"); approve.add_argument("--role", choices=["qa", "review"], required=True); approve.add_argument("--status"); approve.add_argument("--reason", required=True); approve.set_defaults(fn=cmd_approve)
     verify = sub.add_parser("verify"); verify.add_argument("id"); verify.set_defaults(fn=cmd_verify)
-    dispatch = sub.add_parser("dispatch"); dispatch.add_argument("id"); dispatch.add_argument("--runner", required=True); dispatch.add_argument("--agent-id"); dispatch.set_defaults(fn=cmd_dispatch)
-    dispatch_ready = sub.add_parser("dispatch-ready"); dispatch_ready.add_argument("--runner", required=True); dispatch_ready.add_argument("--limit", type=int); dispatch_ready.add_argument("--context"); dispatch_ready.add_argument("--epic"); dispatch_ready.add_argument("--agent-id"); dispatch_ready.set_defaults(fn=cmd_dispatch_ready)
+    dispatch = sub.add_parser("dispatch"); dispatch.add_argument("id"); dispatch.add_argument("--runner"); dispatch.add_argument("--agent-id"); dispatch.set_defaults(fn=cmd_dispatch)
+    dispatch_ready = sub.add_parser("dispatch-ready"); dispatch_ready.add_argument("--runner"); dispatch_ready.add_argument("--limit", type=int); dispatch_ready.add_argument("--context"); dispatch_ready.add_argument("--epic"); dispatch_ready.add_argument("--agent-id"); dispatch_ready.set_defaults(fn=cmd_dispatch_ready)
     route = sub.add_parser("route"); route.add_argument("id"); route.set_defaults(fn=cmd_route)
     status = sub.add_parser("status"); status.add_argument("--context"); status.add_argument("--epic"); status.set_defaults(fn=cmd_status)
     timeline = sub.add_parser("timeline"); timeline.set_defaults(fn=cmd_timeline)
@@ -1188,6 +1314,9 @@ def parser() -> argparse.ArgumentParser:
     context = sub.add_parser("context"); context_sub = context.add_subparsers(dest="context_command", required=True)
     context_add = context_sub.add_parser("add"); context_add.add_argument("name"); context_add.add_argument("--path", required=True); context_add.add_argument("--owner", required=True); context_add.add_argument("--force", action="store_true", help="update an existing context, bumping its revision"); context_add.set_defaults(fn=cmd_context_add)
     context_list = context_sub.add_parser("list"); context_list.set_defaults(fn=cmd_context_list)
+    runner = sub.add_parser("runner"); runner_sub = runner.add_subparsers(dest="runner_command", required=True)
+    runner_add = runner_sub.add_parser("add"); runner_add.add_argument("name"); runner_add.add_argument("--command", required=True); runner_add.add_argument("--model"); runner_add.add_argument("--provider"); runner_add.add_argument("--description"); runner_add.add_argument("--default", action="store_true"); runner_add.add_argument("--force", action="store_true"); runner_add.set_defaults(fn=cmd_runner_add)
+    runner_list = runner_sub.add_parser("list"); runner_list.set_defaults(fn=cmd_runner_list)
     epics = sub.add_parser("epics"); epics.set_defaults(fn=cmd_epics)
     epic = sub.add_parser("epic"); epic_sub = epic.add_subparsers(dest="epic_command", required=True)
     epic_add = epic_sub.add_parser("add"); epic_add.add_argument("name"); epic_add.add_argument("--spec", required=True, help="path to the epic's Specification doc"); epic_add.add_argument("--owner"); epic_add.add_argument("--force", action="store_true", help="update an existing epic's spec, bumping its revision"); epic_add.set_defaults(fn=cmd_epic_add)
