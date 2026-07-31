@@ -1,0 +1,7 @@
+roles:
+  qa:
+    runner: opencode-cli
+    model: deepseek-v4-flash
+  reviewer:
+    runner: opencode-cli
+    model: deepseek-v4-pro

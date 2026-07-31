@@ -1,0 +1,45 @@
+﻿version: 2.0.0
+
+# v2 uses nested reference knowledge rather than v1's one-SKILL-per-folder
+# contract. The router discovers these entries dynamically, so new technology
+# folders do not require registry churn.
+skills_root: .ai/skills
+layout: domain/technology
+required_documents:
+  - overview.md
+  - patterns.md
+  - best-practices.md
+  - pitfalls.md
+  - examples.md
+
+core_skills:
+  path: .ai/skills/core
+  source: v1-adapted
+  contract: SKILL.md plus v2 adapter documents
+  names: [accessibility, api-contract, architecture-decisions, code-review, contract-testing, data-migration, debugging, dependency-management, deployment-infra, documentation-maintenance, e2e-testing, frontend-core, github-actions-ci, integration-contracts, nodejs-api-core, observability, performance-profiling, refactoring, release-management, requirements-intake, security-review, skill-router, test-and-validation, threat-modeling, webhooks-and-retries, workflow-orchestration]
+
+stack_skills:
+  nestjs-core: {path: .ai/skills/backend/nestjs-core, stack: [nestjs]}
+  nestjs-data-access: {path: .ai/skills/backend/nestjs-data-access, stack: [nestjs, database]}
+  vite-frontend: {path: .ai/skills/frontend/vite-frontend, stack: [vite]}
+  react-vite: {path: .ai/skills/frontend/react-vite, stack: [react, vite]}
+  vitest-testing: {path: .ai/skills/testing/vitest-testing, stack: [vitest]}
+  docker-compose-local: {path: .ai/skills/devops/docker-compose-local, stack: [docker, compose]}
+
+owners:
+  planner: []
+  researcher: []
+  architect: []
+  backend: [backend, database, ai]
+  frontend: [frontend]
+  database: [database]
+  devops: [devops]
+  qa: [testing]
+  reviewer: []
+  document: []
+  release: [devops]
+  security: []
+  integration: []
+  performance: []
+  router: []
+  scheduler: []

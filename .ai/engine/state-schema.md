@@ -47,10 +47,10 @@ rest.
 
 `context` is an optional free-form tag naming the bounded context or
 service a task belongs to (e.g. `ordering`, `billing`, `ui`). Register
-contexts in `.ai/contexts.yaml` (`ai-kit context add <name> --path <glob>
+contexts in `.ai-config/contexts.yaml` (`ai-kit context add <name> --path <glob>
 --owner <role>`, `ai-kit context list`) so `status`, `ready`, and `graph`
 can be filtered with `--context`. When `module_boundary` is enabled in
-`.ai/rules.yaml` (default `false`, opt-in), gate **G6** rejects a task whose
+`.ai-config/rules.yaml` (default `false`, opt-in), gate **G6** rejects a task whose
 `files` list contains a path outside its registered context's glob — this
 is what lets multiple agents work different services (api/ui/database) in
 parallel without silently stepping on each other's files. A task with no
@@ -61,7 +61,7 @@ blueprint/feature across services (a blueprint split into api+ui+db tasks
 shares one `epic` value). `ai-kit epics` reports per-epic totals and
 `percent_done`; `status`/`ready` also accept `--epic` to filter.
 
-An epic can optionally be registered in `.ai/epics.yaml` (`ai-kit epic add
+An epic can optionally be registered in `.ai-config/epics.yaml` (`ai-kit epic add
 <name> --spec <path> [--owner <role>]`, `ai-kit epic list`), pointing at its
 **Specification** doc — the design/acceptance-criteria writeup the epic's
 tasks were planned against. Registering it is what enables `epic_revision`
@@ -74,10 +74,10 @@ automatically, with no CLI flag:
 
 - `base_commit` — the repo's git HEAD at task-creation time (`null` outside
   git or before the first commit).
-- `context_revision` — the registered `.ai/contexts.yaml` revision of the
+- `context_revision` — the registered `.ai-config/contexts.yaml` revision of the
   task's `context` at creation time (`null` if the task has no context, or
   the context wasn't registered yet).
-- `epic_revision` — the registered `.ai/epics.yaml` revision of the task's
+- `epic_revision` — the registered `.ai-config/epics.yaml` revision of the task's
   `epic`'s Specification at creation time (`null` if the task has no epic,
   or the epic wasn't registered yet).
 
@@ -150,7 +150,7 @@ it is never an independent source of lifecycle truth.
 
 ## Runner registry
 
-`.ai/runners.yaml` is the versioned runner registry. A canonical CLI/provider
+`.ai-config/runners.yaml` is the versioned runner registry. A canonical CLI/provider
 entry has a `command` template containing `{prompt}` and `{model}`, a
 `models` allowlist, and optional `provider`/`description`. Model-less entries
 may omit `models` and `{model}`. Top-level `default_executor` and

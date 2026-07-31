@@ -49,17 +49,17 @@ to `.ai-work/logs/events.jsonl`.
 which is for external impediments, not rejected work). Pair it with
 `update-task` to tighten acceptance criteria before redispatching. `verify`
 runs the `test_command`/`lint_command`/`typecheck_command`/`build_command`
-configured in `.ai/kit.yaml` plus the security gate; if all four commands
+configured in `.ai-config/kit.yaml` plus the security gate; if all four commands
 are still the placeholder `true` (nothing configured), it prints a stderr
 warning and sets `"warning"` in its JSON report, since in that case only the
 security gate ran and functional correctness was never actually checked.
 
 `onboard` previews detected host stack, source directories, and verification
 commands. Use `onboard --apply` only after reviewing the output; it backs up
-`.ai/kit.yaml` before updating it. A custom `--state /path/name.json` uses
+`.ai-config/kit.yaml` before updating it. A custom `--state /path/name.json` uses
 `/path/name/` as its isolated artifact and audit workspace.
 
-Runner profiles live in `.ai/runners.yaml`. The canonical shape is one
+Runner profiles live in `.ai-config/runners.yaml`. The canonical shape is one
 profile per CLI/provider, with a command template and a `models` allowlist:
 
 ```yaml
@@ -88,10 +88,23 @@ profiles, and aliases. `runner add` supports `--models MODEL...` for grouped
 profiles, legacy `--model MODEL`, and `--default-model MODEL`; it preserves
 existing aliases and grouped profiles.
 
-`context` (registered via `.ai/contexts.yaml`) scopes tasks to a service or
+A runner entry may set `input: json-file` (currently set on `codex-cli`,
+`claude-cli`, and `copilot-cli` in `.ai-config/runners.yaml`). When set,
+`dispatch` writes a JSON snapshot of the task to
+`.ai-work/handoffs/<task-id>.json` (`schema_version`, `task` fields
+mirroring the task's own record, `execution` identity, and an
+`instructions` string) and points the runner's prompt at that file instead
+of embedding the task inline and referencing `tasks.md`. This is input-side
+only: the agent still self-reports completion by shelling out to `ai-kit
+transition <id> complete`, exactly as every other runner does, and the
+dispatch audit log (`.ai-work/dispatch_log_<id>.json`) records `input_mode`
+(`"json-file"` or `"prompt"`) and `handoff_file` for either case. Runners
+without `input` set keep today's `tasks.md`-referencing prompt unchanged.
+
+`context` (registered via `.ai-config/contexts.yaml`) scopes tasks to a service or
 bounded context (`api`, `ui`, `database`, ...); `--context` filters
 `status`/`ready`/`graph`, and gate G6 (`module_boundary: true` in
-`.ai/rules.yaml`, off by default) rejects a task whose `files` fall outside
+`.ai-config/rules.yaml`, off by default) rejects a task whose `files` fall outside
 its context's registered path glob. `epic` groups tasks belonging to one
 blueprint across services; `ai-kit epics` reports `percent_done` per epic.
 Use these together on a large multi-service project: give each service its
@@ -110,9 +123,43 @@ each concurrent agent instance a distinct identity — it's recorded as
 `claimed_by: "role#agent_id"` so the audit trail can tell apart multiple
 agents sharing one role.
 
+`ai-kit pipeline <task-id> [--agent-id ID]` chains one task through
+`dispatch -> verify -> qa-pass -> review-approve -> close` in a single
+synchronous call. The executor identity is `runners.yaml`'s existing
+`default_executor`/`default_model` (the same fallback plain `dispatch`
+already uses); `qa` and `reviewer` identities come from `.ai-config/automation.yaml`,
+a role-based mapping for the two roles that have no equivalent anywhere
+else in the registry:
+
+```yaml
+roles:
+  qa:
+    runner: opencode-cli
+    model: deepseek-v4-flash
+  reviewer:
+    runner: opencode-cli
+    model: deepseek-v4-pro
+```
+
+`automation.yaml` deliberately does not redefine `executor` — duplicating
+`default_executor`/`default_model` there would let the two configs drift
+out of sync silently. `pipeline` refuses to run if `qa` or `reviewer`
+resolves to the exact same `(runner, model)` as the executor — QA/review
+existing as a separate phase is pointless if it's the same identity
+re-checking its own work. Each QA/review
+evidence file it writes also records that phase's `runner`, `model`, and a
+fresh `agent_id`, alongside the existing `kind`/`status`/`verdict`/`reason`
+fields (these three identity fields are optional on plain `ai-kit approve`
+too — pass `--runner`/`--model`/`--agent-id` to stamp manual approvals the
+same way). If `verify` fails, `pipeline` stops with the task left at
+`implementation-complete` rather than forcing a QA/review verdict on broken
+work — fix it and re-run `ai-kit pipeline <task-id>`. There is deliberately
+no auto-triggering scheduler and no retry/resume across phases yet: this is
+a manually-invoked, single-task chain, not a background service.
+
 Every task also records `base_commit` (git HEAD at creation),
-`context_revision` (its context's `.ai/contexts.yaml` revision at creation),
-and `epic_revision` (its epic's Specification revision in `.ai/epics.yaml`
+`context_revision` (its context's `.ai-config/contexts.yaml` revision at creation),
+and `epic_revision` (its epic's Specification revision in `.ai-config/epics.yaml`
 at creation) automatically. `context add ... --force` bumps a context's
 revision when its path/owner changes; `epic add <name> --spec <path>
 [--owner <role>] --force` does the same for an epic's Specification doc.
@@ -149,4 +196,4 @@ CLI as a subprocess against isolated tempfile-based `--state` paths, covering
 the task lifecycle, self-review guard, block/unblock/reject, context/epic/
 contract drift, board filters and board/drift flag parity, and the `graph`
 raw-output regression. It never touches this repo's real `.ai-work` state or
-leaves residue in `.ai/contexts.yaml`/`.ai/epics.yaml`.
+leaves residue in `.ai-config/contexts.yaml`/`.ai-config/epics.yaml`.

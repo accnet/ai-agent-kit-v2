@@ -1,12 +1,12 @@
 ﻿---
 name: skill-router
-description: Entry router for repo-local skills. Use first on any task to classify intent + size, then select which .ai/skills/ to load and the process to follow. Reads .ai/registry.yaml; never loads host-level skills.
+description: Entry router for repo-local skills. Use first on any task to classify intent + size, then select which .ai/skills/ to load and the process to follow. Reads .ai-config/registry.yaml; never loads host-level skills.
 version: 0.2.0
 tier: core
 stack: [any]
 owner: any
 gates: [G1]
-related: [.ai/modules/planning/intent-analysis.md, .ai/registry.yaml]
+related: [.ai/modules/planning/intent-analysis.md, .ai-config/registry.yaml]
 ---
 
 # Skill: skill-router
@@ -31,7 +31,7 @@ First, on every task, before loading any other skill or touching code.
 - [ ] Routing note written to `.ai-work/session.md`
 
 ## Anti-patterns
-- Reaching for a host/IDE skill not listed in `.ai/registry.yaml`
+- Reaching for a host/IDE skill not listed in `.ai-config/registry.yaml`
 - Loading every skill up front instead of per phase
 - Skipping the router and guessing which skills apply
 

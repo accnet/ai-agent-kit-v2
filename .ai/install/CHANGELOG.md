@@ -5,7 +5,7 @@
 ### Added
 
 - Structured runner registry: `.ai/runners.json` is replaced by
-  `.ai/runners.yaml`, with `command`, optional `model`/`provider`/`description`,
+  `.ai-config/runners.yaml`, with `command`, optional `model`/`provider`/`description`,
   and a top-level `default_executor: <name>` scalar naming the single runner
   `dispatch-ready` is allowed to run automatically. Added `ai-kit runner add
   [--default]` and `runner list` (now returns `{"default_executor": ...,
@@ -37,7 +37,7 @@
   `contract_stale`. Older tasks are migrated with empty `depends_on` and
   `contract_hashes` fields.
 - Task provenance/drift: every task now records `base_commit` (git HEAD at
-  creation), `context_revision` (its context's `.ai/contexts.yaml`
+  creation), `context_revision` (its context's `.ai-config/contexts.yaml`
   revision at creation), and `epic_revision` (its epic's Specification
   revision at creation), captured automatically. `context add --force`
   updates an existing context and bumps its revision. `ai-kit drift
@@ -45,7 +45,7 @@
   `base_commit` and whether the task's context or epic has been revised
   since — signal for whether a long-lived task needs a re-plan before
   dispatch.
-- Epic Specification registry: `.ai/epics.yaml` (`epic add <name> --spec
+- Epic Specification registry: `.ai-config/epics.yaml` (`epic add <name> --spec
   <path> [--owner <role>] [--force]`, `epic list`) optionally registers an
   epic's Specification doc and tracks its revision, enabling `epic_revision`
   drift detection above. Registering an epic is optional — `task.epic`
@@ -60,8 +60,8 @@
 - `blocked_reason` field: set by `block`, shown in `tasks.md`, persists through
   `unblock` (cleared only on `start`).
 - Bounded-context/module support: optional `task.context`, registered via
-  `.ai/contexts.yaml` (`context add`/`context list`); gate **G6**
-  (`module_boundary`, opt-in via `.ai/rules.yaml`) rejects a task whose
+  `.ai-config/contexts.yaml` (`context add`/`context list`); gate **G6**
+  (`module_boundary`, opt-in via `.ai-config/rules.yaml`) rejects a task whose
   `files` fall outside its context's registered path glob. `--context` filters
   `status`/`ready`/`graph`.
 - Epic/blueprint rollups: optional `task.epic`; `ai-kit epics` reports
@@ -74,12 +74,12 @@
   [--context C] [--epic E]` atomically claims and fans out N ready tasks to
   background runner processes.
 - `verify` now prints a warning and reports `"warning"` when all four
-  `*_command` entries in `.ai/kit.yaml` are still the placeholder `true`,
+  `*_command` entries in `.ai-config/kit.yaml` are still the placeholder `true`,
   since in that case only the security gate ran.
 - Runner prompts are now shell-quoted (`shlex.quote`) before substitution to
   harden against injection from task titles/details.
 - Configurable gates: G1 (planning_first) and G3 (review_required) can now be
-  toggled via `.ai/rules.yaml` without engine changes.
+  toggled via `.ai-config/rules.yaml` without engine changes.
 - Documentation: AGENTS.md now has a "Configurable Gates" table; README.md has
   a "Gate Rules Configuration" section with usage examples.
 - Engine comments added to `_load_rules()` and `validate()` explaining the
@@ -131,5 +131,5 @@
 - `check-kit.sh`: dropped the hard requirement for root-level `GEMINI.md`/
   `ANTIGRAVITY.md`, which a prior refactor intentionally removed as stubs —
   the check was failing on every fresh install (and on this repo itself).
-- `.ai/contexts.yaml`: reset to an empty template; it previously shipped this
+- `.ai-config/contexts.yaml`: reset to an empty template; it previously shipped this
   repo's own demo `billing`/`ordering` contexts to every new install.

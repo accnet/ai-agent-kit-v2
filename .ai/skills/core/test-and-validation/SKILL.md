@@ -12,7 +12,7 @@ related: [.ai/modules/testing.md, .ai/templates/test-case.md]
 # Skill: test-and-validation
 
 ## Purpose
-Define how tests are written and validated so quality is enforced by the repo (Gate G2 + CI), not by whichever skill happened to run. Rules only — the actual test files live in the project (e.g. `src/**/*.test.ts`) and the runner comes from `.ai/kit.yaml` `verification.test_command`.
+Define how tests are written and validated so quality is enforced by the repo (Gate G2 + CI), not by whichever skill happened to run. Rules only — the actual test files live in the project (e.g. `src/**/*.test.ts`) and the runner comes from `.ai-config/kit.yaml` `verification.test_command`.
 
 ## When to use
 Writing tests for any task, or validating a change before marking a task done (G2).

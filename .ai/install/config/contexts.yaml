@@ -1,0 +1,13 @@
+# Bounded-context / service registry for gate G6 (module_boundary).
+# Register one entry per service/module so tasks can be scoped to it, e.g.:
+#
+# contexts:
+#   ordering:
+#     path: src/ordering/*
+#     owner: backend
+#   ui:
+#     path: src/ui/*
+#     owner: frontend
+#
+# Add entries with: ai-kit context add <name> --path <glob> --owner <role>
+contexts:

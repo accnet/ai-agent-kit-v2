@@ -1,0 +1,14 @@
+# Epic/Specification registry for task-provenance drift tracking.
+# Optional: `task.epic` already works as a plain free-form tag with no entry
+# here. Register an entry only if you want `epic_revision` drift detection
+# (see `.ai/engine/state-schema.md` -> "Provenance and drift"), e.g.:
+#
+# epics:
+#   checkout-revamp:
+#     spec: .ai-work/plan/checkout-revamp-spec.md
+#     owner: planner
+#     revision: 1
+#
+# Add entries with: ai-kit epic add <name> --spec <path> --owner <role>
+# Bump the revision after the spec changes: ai-kit epic add <name> --spec <path> --owner <role> --force
+epics:

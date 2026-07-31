@@ -11,7 +11,7 @@ bad() { printf '  FAIL %s\n' "$1"; fail=1; }
 note() { printf '  WARN %s\n' "$1"; warn=$((warn + 1)); }
 
 echo "AI-Kit v2 doctor - $ROOT"
-for file in AGENTS.md README.md .ai/kit.yaml .ai/rules.yaml .ai/registry.yaml \
+for file in AGENTS.md .ai-config/kit.yaml .ai-config/rules.yaml .ai-config/registry.yaml \
   .ai/engine/ai_kit.py .ai/scripts/check-kit.sh .ai/scripts/skills-for.sh .ai-work/state/current.json; do
   [[ -f "$file" ]] && ok "$file" || bad "$file missing"
 done
@@ -42,7 +42,7 @@ if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
 fi
 
 for key in test_command typecheck_command build_command lint_command; do
-  cmd="$(awk -v key="$key" '$1 == key ":" {sub(/^[^:]*:[[:space:]]*/, ""); print; exit}' .ai/kit.yaml)"
+  cmd="$(awk -v key="$key" '$1 == key ":" {sub(/^[^:]*:[[:space:]]*/, ""); print; exit}' .ai-config/kit.yaml)"
   [[ -n "$cmd" ]] && ok "$key configured: $cmd" || note "$key not configured"
 done
 

@@ -100,7 +100,7 @@ Before a component is marked implemented, provide:
 
 ## Startup Procedure
 
-1. Read `.ai/kit.yaml`, `.ai/rules.yaml`, and `.ai/registry.yaml`.
+1. Read `.ai-config/kit.yaml`, `.ai-config/rules.yaml`, and `.ai-config/registry.yaml`.
 2. Read `.ai-work/state/current.json`. Resume only a current, scoped task.
 3. Classify the request: feature, bugfix, refactor, migration, release, or
    research. Select its workflow and applicable role contract.
@@ -179,7 +179,7 @@ schema changes, data fixes, seeds, and backfills.
 
 ### Configurable Gates
 
-Gates G1 and G3 are configurable at runtime via `.ai/rules.yaml`. The engine
+Gates G1 and G3 are configurable at runtime via `.ai-config/rules.yaml`. The engine
 loads this file on every `validate()` call and applies the flags below:
 
 | Rule key | Default | Affected gate | Behavior when `false` |
@@ -188,7 +188,7 @@ loads this file on every `validate()` call and applies the flags below:
 | `review_required` | `true` | G3 | Allows tasks at `done` status without review evidence |
 
 When a rule file is missing or malformed, the engine falls back to the safe
-defaults shown above. See `.ai/rules.yaml` for the full list of supported
+defaults shown above. See `.ai-config/rules.yaml` for the full list of supported
 rules.
 
 When a gate fails, leave the task open and record the failure. Do not hide

@@ -9,6 +9,8 @@ param(
 $aiRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $targetPath = (Resolve-Path $Target).Path
 $projectRoot = (Split-Path -Parent $aiRoot)
+$configTemplateRoot = Join-Path $aiRoot 'install/config'
+$configFiles = @('runners.yaml', 'automation.yaml', 'registry.yaml', 'contexts.yaml', 'epics.yaml', 'rules.yaml', 'kit.yaml')
 if ($targetPath -eq $aiRoot) { throw 'Target cannot be the .ai directory.' }
 
 $entries = New-Object System.Collections.Generic.List[object]
@@ -19,6 +21,7 @@ function Add-Entry([string]$Source, [string]$Destination) {
 # The complete .ai tree is the install source. Root-level adapters are added
 # from templates owned by .ai below.
 Get-ChildItem -LiteralPath $aiRoot -Recurse -File -Force | ForEach-Object {
+    if ($_.FullName.StartsWith($configTemplateRoot, [StringComparison]::OrdinalIgnoreCase)) { return }
     $relative = $_.FullName.Substring($aiRoot.Length).TrimStart('\','/')
     $destination = Join-Path (Join-Path $targetPath '.ai') $relative
     Add-Entry $_.FullName $destination
@@ -31,8 +34,13 @@ Get-ChildItem -LiteralPath $templateRoot -Recurse -File -Force | ForEach-Object 
     Add-Entry $_.FullName (Join-Path $targetPath $relative)
 }
 
+foreach ($name in $configFiles) {
+    Add-Entry (Join-Path $configTemplateRoot $name) (Join-Path (Join-Path $targetPath '.ai-config') $name)
+}
+
 $conflicts = New-Object System.Collections.Generic.List[string]
 foreach ($entry in $entries) {
+    if ($entry.Destination.StartsWith((Join-Path $targetPath '.ai-config') + [IO.Path]::DirectorySeparatorChar) -and (Test-Path -LiteralPath $entry.Destination)) { continue }
     if (-not (Test-Path -LiteralPath $entry.Destination)) { continue }
     $samePath = [IO.Path]::GetFullPath($entry.Source) -eq [IO.Path]::GetFullPath($entry.Destination)
     if ($samePath) { continue }
@@ -47,6 +55,7 @@ if ($conflicts.Count -gt 0 -and -not $Force) {
 }
 
 foreach ($entry in $entries) {
+    if ($entry.Destination.StartsWith((Join-Path $targetPath '.ai-config') + [IO.Path]::DirectorySeparatorChar) -and (Test-Path -LiteralPath $entry.Destination)) { continue }
     $relative = $entry.Destination.Substring($targetPath.Length).TrimStart('\','/')
     if ($DryRun) { Write-Output "copy: $relative"; continue }
     if ([IO.Path]::GetFullPath($entry.Source) -eq [IO.Path]::GetFullPath($entry.Destination)) { continue }

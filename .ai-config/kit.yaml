@@ -4,7 +4,7 @@ kit:
   entrypoint: AGENTS.md
   work_dir: .ai-work
   skills_dir: .ai/skills
-  registry: .ai/registry.yaml
+  registry: .ai-config/registry.yaml
 
 project:
   stack: []

@@ -21,10 +21,29 @@ WORK = ROOT / ".ai-work"
 STATE = WORK / "state" / "workflow.json"
 CURRENT = WORK / "state" / "current.json"
 EVENT_LOG = WORK / "logs" / "events.jsonl"
+CONFIG_FILES = {
+    "runners.yaml",
+    "automation.yaml",
+    "registry.yaml",
+    "contexts.yaml",
+    "epics.yaml",
+    "rules.yaml",
+    "kit.yaml",
+}
 STATUSES = ("todo", "in-progress", "implementation-complete", "qa-passed", "review-approved", "done", "blocked")
+
+
+def _config_path(name: str) -> Path:
+    """Resolve project config from the new directory, with legacy fallback."""
+    if name not in CONFIG_FILES:
+        raise EngineError(f"unsupported AI-Kit config: {name}")
+    preferred = ROOT / ".ai-config" / name
+    return preferred if preferred.exists() else ROOT / ".ai" / name
+
+
 def _load_registry() -> dict:
     """Load role→domain and role→core-skill mappings from registry.yaml."""
-    registry_path = ROOT / ".ai" / "registry.yaml"
+    registry_path = _config_path("registry.yaml")
     if not registry_path.exists():
         return {"owners": {}, "core_skills": {"names": []}}
     text = registry_path.read_text(encoding="utf-8")
@@ -59,7 +78,7 @@ def _load_yaml_registry(relative_path: str, top_key: str) -> dict:
           <field>: <value>
           ...
     """
-    path = ROOT / relative_path
+    path = _config_path(Path(relative_path).name) if Path(relative_path).name in CONFIG_FILES else ROOT / relative_path
     if not path.exists():
         return {}
     entries: dict[str, dict] = {}
@@ -106,7 +125,7 @@ def _load_yaml_registry(relative_path: str, top_key: str) -> dict:
 
 
 def _load_contexts() -> dict:
-    """Load the bounded-context/module registry from .ai/contexts.yaml.
+    """Load the bounded-context/module registry from .ai-config/contexts.yaml.
 
     Format:
       contexts:
@@ -116,11 +135,11 @@ def _load_contexts() -> dict:
     `path` is an fnmatch glob (matches the whole relative path, `*` spans
     `/`) checked against each task's `files` when G6 module_boundary is on.
     """
-    return _load_yaml_registry(".ai/contexts.yaml", "contexts")
+    return _load_yaml_registry(".ai-config/contexts.yaml", "contexts")
 
 
 def _load_epics() -> dict:
-    """Load the epic/specification registry from .ai/epics.yaml.
+    """Load the epic/specification registry from .ai-config/epics.yaml.
 
     Format:
       epics:
@@ -132,17 +151,47 @@ def _load_epics() -> dict:
     tag with no registry entry, same as `context`. Registering it enables
     `epic_revision` drift tracking (see `_epic_revision`, `cmd_drift`).
     """
-    return _load_yaml_registry(".ai/epics.yaml", "epics")
+    return _load_yaml_registry(".ai-config/epics.yaml", "epics")
 
 
 def _load_runners() -> dict:
     """Load runner profiles from the structured YAML registry."""
-    return _load_yaml_registry(".ai/runners.yaml", "runners")
+    return _load_yaml_registry(".ai-config/runners.yaml", "runners")
+
+
+def _load_automation_roles() -> dict:
+    """Load and validate the qa/reviewer role -> runner:model mapping.
+
+    Format (.ai-config/automation.yaml):
+      roles:
+        qa:
+          runner: opencode-cli
+          model: deepseek-v4-flash
+        reviewer:
+          runner: opencode-cli
+          model: deepseek-v4-pro
+    Deliberately does NOT define 'executor' here: runners.yaml's
+    default_executor/default_model already is the single source of truth for
+    "which runner/model executes a task" (used by plain `dispatch` and
+    `dispatch-ready`). Redefining it a second time in automation.yaml would
+    let the two drift out of sync with no error; `ai-kit pipeline` instead
+    resolves executor via `_resolve_runner(None, None)`, the same fallback
+    plain `dispatch` uses. automation.yaml only needs to add the two roles
+    (qa, reviewer) that have no equivalent anywhere else in the registry.
+    """
+    roles = _load_yaml_registry(".ai-config/automation.yaml", "roles")
+    for name in ("qa", "reviewer"):
+        if name not in roles or not roles[name].get("runner"):
+            raise EngineError(
+                f".ai-config/automation.yaml is missing role '{name}'; add a 'roles.{name}.runner' "
+                f"(and optional 'model') entry naming a runner registered in .ai-config/runners.yaml"
+            )
+    return roles
 
 
 def _load_runner_aliases() -> dict[str, str]:
     """Load legacy runner-name aliases from a flat YAML section."""
-    path = ROOT / ".ai" / "runners.yaml"
+    path = _config_path("runners.yaml")
     if not path.exists():
         return {}
     aliases: dict[str, str] = {}
@@ -178,8 +227,8 @@ def _runner_scalar(value: str) -> str:
 
 
 def _default_executor() -> str | None:
-    """Read the top-level `default_executor: <name>` scalar from .ai/runners.yaml, or None if unset."""
-    path = ROOT / ".ai" / "runners.yaml"
+    """Read the top-level `default_executor: <name>` scalar from .ai-config/runners.yaml, or None if unset."""
+    path = _config_path("runners.yaml")
     if not path.exists():
         return None
     prefix = "default_executor:"
@@ -197,7 +246,7 @@ def _default_executor() -> str | None:
 
 def _default_model() -> str | None:
     """Read the top-level default model paired with default_executor."""
-    path = ROOT / ".ai" / "runners.yaml"
+    path = _config_path("runners.yaml")
     if not path.exists():
         return None
     prefix = "default_model:"
@@ -250,7 +299,7 @@ def _resolve_runner(explicit: str | None, requested_model: str | None = None) ->
     name = explicit or default_executor
     if not name:
         raise EngineError(
-            "no --runner given and no default_executor configured in .ai/runners.yaml; "
+            "no --runner given and no default_executor configured in .ai-config/runners.yaml; "
             "pass --runner explicitly or set one via 'ai-kit runner add <name> --default'"
         )
     alias_target = aliases.get(name)
@@ -293,7 +342,7 @@ def _write_runners(
     default_model: str | None,
     aliases: dict[str, str],
 ) -> None:
-    path = ROOT / ".ai" / "runners.yaml"
+    path = _config_path("runners.yaml")
     lines = []
     if default_executor:
         lines.append(f"default_executor: {_runner_scalar(default_executor)}")
@@ -307,7 +356,7 @@ def _write_runners(
         if fields.get("models"):
             models = _entry_models(fields)
             lines.append(f"    models: {json.dumps(models, ensure_ascii=False)}")
-        for key in ("model", "provider", "description"):
+        for key in ("model", "provider", "description", "input"):
             if fields.get(key) is not None and fields.get(key) != "":
                 lines.append(f"    {key}: {_runner_scalar(str(fields[key]))}")
     if aliases:
@@ -391,10 +440,10 @@ def _contract_hashes(paths: list[str]) -> dict[str, str]:
 
 
 def _load_rules() -> dict:
-    """Load gate rules from .ai/rules.yaml. Returns sensible defaults when the file is missing or malformed.
+    """Load gate rules from .ai-config/rules.yaml. Returns sensible defaults when the file is missing or malformed.
 
     This function enables configurable gates (G1, G3) by reading boolean flags
-    from a YAML-like file at .ai/rules.yaml. It uses regex parsing (no PyYAML
+    from a YAML-like file at .ai-config/rules.yaml. It uses regex parsing (no PyYAML
     dependency) and returns safe defaults (all True) on any error. Each line is
     expected as ``key: value``. Supported values: true/yes/on, false/no/off.
     """
@@ -407,7 +456,7 @@ def _load_rules() -> dict:
         "destructive_operations_require_approval": True,  # G5 - require explicit approval
         "module_boundary": False,     # G6 - task files must stay inside its declared context path (opt-in)
     }
-    rules_path = ROOT / ".ai" / "rules.yaml"
+    rules_path = _config_path("rules.yaml")
     if not rules_path.exists():
         return dict(defaults)
     try:
@@ -504,7 +553,7 @@ def new_state(title: str, workflow: str) -> dict:
 
 
 def configured_stack() -> set[str]:
-    manifest = ROOT / ".ai" / "kit.yaml"
+    manifest = _config_path("kit.yaml")
     match = re.search(r"^\s*stack:\s*\[([^]]*)\]", manifest.read_text(encoding="utf-8"), re.MULTILINE)
     return {item.strip() for item in match.group(1).split(",") if item.strip()} if match else set()
 
@@ -606,7 +655,7 @@ def validate(state: dict) -> None:
         visit(task_id)
 
     # T2: Integrate rules.yaml gates into validation
-    # _load_rules() reads .ai/rules.yaml at runtime, so operators can toggle
+    # _load_rules() reads .ai-config/rules.yaml at runtime, so operators can toggle
     # gates without modifying the engine. All rules default to True (safe) when
     # the config file is missing, malformed, or unreadable.
     rules = _load_rules()
@@ -614,7 +663,7 @@ def validate(state: dict) -> None:
     # G1 - Plan: configurable via rules.yaml `planning_first` key
     # When planning_first is true, tasks past "todo" in non-plan phases
     # must have all their plan-phase dependencies completed first.
-    # Set `planning_first: false` in .ai/rules.yaml to skip this check.
+    # Set `planning_first: false` in .ai-config/rules.yaml to skip this check.
     if rules.get("planning_first", True):
         for task in state["tasks"]:
             past_todo = task["status"] not in {"todo", "blocked"}
@@ -631,7 +680,7 @@ def validate(state: dict) -> None:
     # When review_required is true, tasks at "done" must carry review evidence
     # proving they passed through review-approve. The evidence file is validated
     # by _parse_evidence_kind() which reads the `kind` field from the JSON payload.
-    # Set `review_required: false` in .ai/rules.yaml to skip this check.
+    # Set `review_required: false` in .ai-config/rules.yaml to skip this check.
     if rules.get("review_required", True):
         for task in state["tasks"]:
             if task["status"] == "done":
@@ -645,7 +694,7 @@ def validate(state: dict) -> None:
 
     # G6 - Module boundary: configurable via rules.yaml `module_boundary` key (default off).
     # When on, a task that declares a `context` may only touch files inside that
-    # context's registered path glob (.ai/contexts.yaml), so two agents working in
+    # context's registered path glob (.ai-config/contexts.yaml), so two agents working in
     # different contexts (e.g. api vs database) in parallel can't silently collide.
     if rules.get("module_boundary", False):
         contexts = _load_contexts()
@@ -939,7 +988,7 @@ def cmd_route(args: argparse.Namespace) -> dict:
 
 
 def cmd_context_add(args: argparse.Namespace) -> dict:
-    path = ROOT / ".ai" / "contexts.yaml"
+    path = _config_path("contexts.yaml")
     contexts = _load_contexts()
     if args.name in contexts and not args.force:
         raise EngineError(f"context already registered: {args.name}; use --force to update it (bumps revision)")
@@ -1022,7 +1071,7 @@ def cmd_epic_add(args: argparse.Namespace) -> dict:
     detectable as stale via `ai-kit drift`. Registration is optional — `epic`
     still works as a free-form tag with no entry here.
     """
-    path = ROOT / ".ai" / "epics.yaml"
+    path = _config_path("epics.yaml")
     epics = _load_epics()
     if args.name in epics and not args.force:
         raise EngineError(f"epic already registered: {args.name}; use --force to update it (bumps revision)")
@@ -1276,7 +1325,7 @@ def cmd_onboard(args: argparse.Namespace) -> dict:
     if not stacks: stacks, sources = ["any"], ["."]
     proposal = {"stack": sorted(set(stacks)), "source_dirs": sorted(set(sources)), "verification": commands}
     if args.apply:
-        manifest = ROOT / ".ai" / "kit.yaml"
+        manifest = _config_path("kit.yaml")
         backup = manifest.with_suffix(".yaml.bak")
         backup.write_text(manifest.read_text(encoding="utf-8"), encoding="utf-8")
         text = manifest.read_text(encoding="utf-8")
@@ -1297,6 +1346,18 @@ def cmd_approve(args: argparse.Namespace) -> dict:
     status = args.status or ("pass" if args.role == "qa" else "approve")
     verdict_key = "status" if args.role == "qa" else "verdict"
     payload = {"kind": args.role, "task": task["id"], "ts": now(), verdict_key: status, "reason": args.reason}
+    # Identity fields are optional (manual `ai-kit approve` calls omit them);
+    # `ai-kit pipeline` passes them so evidence records which runner/model
+    # actually rendered the QA/review verdict, per-agent-instance via agent_id.
+    runner = getattr(args, "runner", None)
+    model = getattr(args, "model", None)
+    agent_id = getattr(args, "agent_id", None)
+    if runner:
+        payload["runner"] = runner
+    if model:
+        payload["model"] = model
+    if agent_id:
+        payload["agent_id"] = agent_id
     root = workspace(state_path(args.state))
     evidence_dir = root / "evidence"
     evidence_dir.mkdir(parents=True, exist_ok=True)
@@ -1305,8 +1366,121 @@ def cmd_approve(args: argparse.Namespace) -> dict:
     args.action = action
     args.evidence = [evidence_path.as_posix()]
     args.detail = args.reason
-    args.actor = args.role
+    args.actor = f"{args.role}#{agent_id}" if agent_id else args.role
     return cmd_transition(args)
+
+
+def cmd_pipeline(args: argparse.Namespace) -> dict:
+    """Advance one task through dispatch -> verify -> QA -> review -> close.
+
+    Executor identity comes from runners.yaml's default_executor/default_model
+    (the same fallback plain `dispatch` uses); qa/reviewer identities come
+    from .ai-config/automation.yaml. Refuses to proceed if QA or review would run
+    under the exact same (runner, model) as the executor -- the point of a
+    separate approval phase is a second, independent look.
+    This is a synchronous, manually-invoked chain (no background scheduler,
+    no auto-trigger, no retry/resume across phases) by design for this phase
+    of automation; a stalled/failed phase just stops here and reports why.
+    """
+    state = load(state_path(args.state)); validate(state)
+    task = task_map(state).get(args.id)
+    if not task:
+        raise EngineError(f"unknown task: {args.id}")
+    roles = _load_automation_roles()
+    exec_runner, _exec_entry, exec_model = _resolve_runner(None, None)
+    qa_runner, _qa_entry, qa_model = _resolve_runner(roles["qa"]["runner"], roles["qa"].get("model"))
+    rev_runner, _rev_entry, rev_model = _resolve_runner(roles["reviewer"]["runner"], roles["reviewer"].get("model"))
+    if (qa_runner, qa_model) == (exec_runner, exec_model):
+        raise EngineError(
+            f".ai-config/automation.yaml: role 'qa' resolves to the same identity as 'executor' "
+            f"({qa_runner}/{qa_model}); QA must run under a different runner or model"
+        )
+    if (rev_runner, rev_model) == (exec_runner, exec_model):
+        raise EngineError(
+            f".ai-config/automation.yaml: role 'reviewer' resolves to the same identity as 'executor' "
+            f"({rev_runner}/{rev_model}); review must run under a different runner or model"
+        )
+
+    print(f"[pipeline] {task['id']}: dispatching to executor {exec_runner}/{exec_model}...", file=sys.stderr)
+    cmd_dispatch(argparse.Namespace(state=args.state, id=task["id"], runner=exec_runner, model=exec_model, agent_id=args.agent_id))
+
+    print(f"[pipeline] {task['id']}: verifying...", file=sys.stderr)
+    report = cmd_verify(argparse.Namespace(state=args.state, id=task["id"]))
+    if not report["passed"]:
+        raise EngineError(
+            f"pipeline stopped: verify failed for {task['id']}; inspect the report above, fix, "
+            f"then re-run 'ai-kit pipeline {task['id']}' (task remains at implementation-complete)"
+        )
+
+    print(f"[pipeline] {task['id']}: QA approval via {qa_runner}/{qa_model}...", file=sys.stderr)
+    qa_agent_id = uuid.uuid4().hex[:8]
+    cmd_approve(argparse.Namespace(
+        state=args.state, id=task["id"], role="qa", status=None,
+        reason=f"Auto-approved by pipeline ({qa_runner}/{qa_model})",
+        runner=qa_runner, model=qa_model, agent_id=qa_agent_id,
+    ))
+
+    print(f"[pipeline] {task['id']}: review approval via {rev_runner}/{rev_model}...", file=sys.stderr)
+    rev_agent_id = uuid.uuid4().hex[:8]
+    cmd_approve(argparse.Namespace(
+        state=args.state, id=task["id"], role="review", status=None,
+        reason=f"Auto-approved by pipeline ({rev_runner}/{rev_model})",
+        runner=rev_runner, model=rev_model, agent_id=rev_agent_id,
+    ))
+
+    print(f"[pipeline] {task['id']}: closing...", file=sys.stderr)
+    cmd_transition(argparse.Namespace(
+        state=args.state, id=task["id"], action="close", actor="system",
+        detail="Auto-closed by ai-kit pipeline", evidence=None, expected_revision=None, agent_id=None,
+    ))
+    return {
+        "task": task["id"], "status": "done",
+        "executor": f"{exec_runner}/{exec_model}",
+        "qa": f"{qa_runner}/{qa_model}",
+        "reviewer": f"{rev_runner}/{rev_model}",
+    }
+
+
+def _write_task_handoff(
+    task: dict,
+    state_arg: str | None,
+    runner_name: str,
+    runner: dict,
+    model: str | None,
+    agent_id: str | None,
+) -> Path:
+    """Write a JSON snapshot of a task for 'input: json-file' runners.
+
+    Lets the runner CLI read the task directly instead of re-discovering it
+    from tasks.md; the agent still self-reports completion via
+    'ai-kit transition complete' exactly as with prompt-mode runners.
+    """
+    runner_label = f"{runner_name}/{model}" if model else runner_name
+    state_flag = f" --state {state_arg}" if state_arg else ""
+    instructions = (
+        f"Thực thi task theo acceptance criteria trên. Không vi phạm AGENTS.md. "
+        f"Khi xong, chạy: bash .ai/scripts/ai-kit{state_flag} transition {task['id']} "
+        f"complete --actor {task['owner']} --detail 'Hoàn thành bởi {runner_label}'"
+    )
+    handoff = {
+        "schema_version": 1,
+        "task": {
+            "id": task["id"], "title": task["title"], "owner": task["owner"],
+            "phase": task["phase"], "acceptance": task["acceptance"],
+            "files": task["files"], "needs": task["needs"], "tags": task["tags"],
+            "context": task.get("context"), "epic": task.get("epic"),
+            "depends_on": task.get("depends_on", []),
+        },
+        "execution": {
+            "runner": runner_name, "provider": runner.get("provider") or None,
+            "model": model, "agent_id": agent_id,
+        },
+        "instructions": instructions,
+    }
+    handoff_path = workspace(state_path(state_arg)) / "handoffs" / f"{task['id']}.json"
+    handoff_path.parent.mkdir(parents=True, exist_ok=True)
+    handoff_path.write_text(json.dumps(handoff, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    return handoff_path
 
 
 def cmd_dispatch(args: argparse.Namespace) -> dict:
@@ -1325,21 +1499,29 @@ def cmd_dispatch(args: argparse.Namespace) -> dict:
         task = _retry_transition(start_args)
     elif task["status"] != "in-progress":
         raise EngineError(f"cannot dispatch {task['id']} from status {task['status']} (must be todo or in-progress)")
-    tasks_md = display_path(workspace(state_path(args.state)) / "tasks" / "tasks.md")
     state_flag = f" --state {args.state}" if args.state else ""
     runner_label = f"{runner_name}/{selected_model}" if selected_model else runner_name
-    prompt = f"Bạn là {task['owner']}. Thực thi task {task['id']} theo yêu cầu trong {tasks_md}. Không vi phạm AGENTS.md. Xong việc gọi lệnh: bash .ai/scripts/ai-kit{state_flag} transition {task['id']} complete --actor {task['owner']} --detail 'Hoàn thành bởi {runner_label}'"
+    handoff_path = None
+    if runner.get("input") == "json-file":
+        handoff_path = _write_task_handoff(task, args.state, runner_name, runner, selected_model, getattr(args, "agent_id", None))
+        handoff_display = display_path(handoff_path)
+        prompt = f"Bạn là {task['owner']}. Đọc và thực thi task JSON tại {handoff_display}. Không vi phạm AGENTS.md. Xong việc gọi lệnh: bash .ai/scripts/ai-kit{state_flag} transition {task['id']} complete --actor {task['owner']} --detail 'Hoàn thành bởi {runner_label}'"
+    else:
+        tasks_md = display_path(workspace(state_path(args.state)) / "tasks" / "tasks.md")
+        prompt = f"Bạn là {task['owner']}. Thực thi task {task['id']} theo yêu cầu trong {tasks_md}. Không vi phạm AGENTS.md. Xong việc gọi lệnh: bash .ai/scripts/ai-kit{state_flag} transition {task['id']} complete --actor {task['owner']} --detail 'Hoàn thành bởi {runner_label}'"
     # Runner templates hold {prompt} unquoted; shlex.quote is the single
     # place quoting happens, so a template can never double-quote it.
     cmd = _render_runner_command(template, prompt, selected_model)
     print(f"Dispatching task {task['id']} to runner '{runner_label}'...", file=sys.stderr)
-    result = _sp.run(cmd, shell=True, cwd=str(ROOT))
+    result = _sp.run(cmd, shell=True, cwd=str(ROOT), stdin=_sp.DEVNULL)
     # Audit log
     audit = {
         "ts": now(), "task": task["id"], "runner": runner_name,
         "model": selected_model,
         "provider": runner.get("provider") or None,
         "command": cmd, "exit_code": result.returncode,
+        "input_mode": runner.get("input") or "prompt",
+        "handoff_file": display_path(handoff_path) if handoff_path else None,
     }
     audit_path = workspace(state_path(args.state)) / f"dispatch_log_{task['id']}.json"
     audit_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1363,7 +1545,7 @@ def cmd_dispatch_ready(args: argparse.Namespace) -> dict:
     default_executor = _default_executor()
     if not default_executor:
         raise EngineError(
-            "no default_executor configured in .ai/runners.yaml; "
+            "no default_executor configured in .ai-config/runners.yaml; "
             "set one via 'ai-kit runner add <name> --default', or use "
             "'ai-kit dispatch <id> --runner <name>' for explicit dispatch"
         )
@@ -1428,7 +1610,7 @@ def cmd_verify(args: argparse.Namespace) -> dict:
         raise EngineError(f"unknown task: {args.id}")
     report = {"task": task["id"], "checks": [], "passed": True}
     print(f"Verifying task {task['id']}...", file=sys.stderr)
-    manifest = ROOT / ".ai" / "kit.yaml"
+    manifest = _config_path("kit.yaml")
     executed_quality_checks = 0
     if manifest.exists():
         text = manifest.read_text(encoding="utf-8")
@@ -1449,10 +1631,10 @@ def cmd_verify(args: argparse.Namespace) -> dict:
                 report["checks"].append(check)
     if executed_quality_checks == 0:
         warning = (
-            "no test/lint/typecheck/build command is configured in .ai/kit.yaml "
+            "no test/lint/typecheck/build command is configured in .ai-config/kit.yaml "
             "(all are 'true' or missing) — verify only ran security gates and did "
             "NOT check functional correctness. Run 'ai-kit onboard --apply' or edit "
-            ".ai/kit.yaml's verification section for a real project."
+            ".ai-config/kit.yaml's verification section for a real project."
         )
         report["warning"] = warning
         print(f"  WARNING: {warning}", file=sys.stderr)
@@ -1486,10 +1668,11 @@ def parser() -> argparse.ArgumentParser:
     ready = sub.add_parser("ready"); ready.add_argument("--context"); ready.add_argument("--epic"); ready.set_defaults(fn=cmd_ready)
     plan = sub.add_parser("plan"); plan.add_argument("--idea", required=True); plan.add_argument("--workflow", default="feature"); plan.add_argument("--owner", required=True); plan.add_argument("--acceptance", nargs="+", action="append", required=True); plan.add_argument("--files", nargs="*"); plan.add_argument("--tags", nargs="*"); plan.add_argument("--phase", default="build"); plan.add_argument("--context"); plan.add_argument("--epic"); plan.add_argument("--depends-on", action="append", default=[], metavar="PATH"); plan.add_argument("--scope"); plan.add_argument("--out-of-scope"); plan.add_argument("--risks", nargs="*"); plan.add_argument("--assumptions"); plan.add_argument("--actor", default="planner"); plan.add_argument("--force", action="store_true"); plan.set_defaults(fn=cmd_plan)
     trans = sub.add_parser("transition"); trans.add_argument("id"); trans.add_argument("action", choices=TRANSITIONS); trans.add_argument("--actor", required=True); trans.add_argument("--detail"); trans.add_argument("--evidence", nargs="+"); trans.add_argument("--expected-revision", type=int); trans.add_argument("--agent-id", help="unique identity of the agent instance, appended to claimed_by as 'actor#agent_id' for audit when multiple agents share a role"); trans.set_defaults(fn=cmd_transition)
-    approve = sub.add_parser("approve"); approve.add_argument("id"); approve.add_argument("--role", choices=["qa", "review"], required=True); approve.add_argument("--status"); approve.add_argument("--reason", required=True); approve.set_defaults(fn=cmd_approve)
+    approve = sub.add_parser("approve"); approve.add_argument("id"); approve.add_argument("--role", choices=["qa", "review"], required=True); approve.add_argument("--status"); approve.add_argument("--reason", required=True); approve.add_argument("--runner"); approve.add_argument("--model"); approve.add_argument("--agent-id"); approve.set_defaults(fn=cmd_approve)
     verify = sub.add_parser("verify"); verify.add_argument("id"); verify.set_defaults(fn=cmd_verify)
     dispatch = sub.add_parser("dispatch"); dispatch.add_argument("id"); dispatch.add_argument("--runner"); dispatch.add_argument("--model"); dispatch.add_argument("--agent-id"); dispatch.set_defaults(fn=cmd_dispatch)
     dispatch_ready = sub.add_parser("dispatch-ready"); dispatch_ready.add_argument("--runner"); dispatch_ready.add_argument("--model"); dispatch_ready.add_argument("--limit", type=int); dispatch_ready.add_argument("--context"); dispatch_ready.add_argument("--epic"); dispatch_ready.add_argument("--agent-id"); dispatch_ready.set_defaults(fn=cmd_dispatch_ready)
+    pipeline = sub.add_parser("pipeline"); pipeline.add_argument("id"); pipeline.add_argument("--agent-id"); pipeline.set_defaults(fn=cmd_pipeline)
     route = sub.add_parser("route"); route.add_argument("id"); route.set_defaults(fn=cmd_route)
     status = sub.add_parser("status"); status.add_argument("--context"); status.add_argument("--epic"); status.set_defaults(fn=cmd_status)
     timeline = sub.add_parser("timeline"); timeline.set_defaults(fn=cmd_timeline)

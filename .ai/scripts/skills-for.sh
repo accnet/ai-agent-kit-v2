@@ -10,7 +10,7 @@ override="${2:-}"
 domains="$(awk -v role="$role" '
   $1 == role ":" {gsub(/.*\[/, ""); gsub(/\].*/, ""); gsub(/,/, " "); print; found=1}
   END {if (!found) print "any"}
-' .ai/registry.yaml)"
+' .ai-config/registry.yaml)"
 [[ -n "$override" ]] && domains="${override//,/ }"
 
 for domain in $domains; do

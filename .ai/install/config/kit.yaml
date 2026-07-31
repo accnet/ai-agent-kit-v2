@@ -1,0 +1,17 @@
+kit:
+  id: ai-kit-v2
+  version: 2.0.0
+  entrypoint: AGENTS.md
+  work_dir: .ai-work
+  skills_dir: .ai/skills
+  registry: .ai-config/registry.yaml
+
+project:
+  stack: []
+  source_dirs: []
+
+verification:
+  test_command: true
+  typecheck_command: true
+  build_command: true
+  lint_command: true

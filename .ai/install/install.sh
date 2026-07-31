@@ -25,9 +25,11 @@ done
 [[ "$TARGET" != "$AI_ROOT" ]] || { echo "Target cannot be the .ai directory." >&2; exit 2; }
 
 TEMPLATE_ROOT="$AI_ROOT/install/templates"
+CONFIG_TEMPLATE_ROOT="$AI_ROOT/install/config"
 PROJECT_ROOT="$(cd "$AI_ROOT/.." && pwd)"
 SOURCES=()
 DESTINATIONS=()
+CONFIG_FILES=(runners.yaml automation.yaml registry.yaml contexts.yaml epics.yaml rules.yaml kit.yaml)
 
 add_entry() {
   SOURCES+=("$1")
@@ -38,6 +40,7 @@ add_entry() {
 # sufficient; root-level adapters are materialized from templates below.
 while IFS= read -r -d '' file; do
   rel="${file#$AI_ROOT/}"
+  [[ "$file" == "$CONFIG_TEMPLATE_ROOT/"* ]] && continue
   if git -C "$PROJECT_ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     git -C "$PROJECT_ROOT" check-ignore -q -- ".ai/$rel" && continue
   fi
@@ -51,10 +54,18 @@ while IFS= read -r -d '' file; do
   add_entry "$file" "$TARGET/$rel"
 done < <(find "$TEMPLATE_ROOT" \( -type f -o -type l \) -print0)
 
+# Config is project-owned state, so seed it separately and never overwrite it.
+for name in "${CONFIG_FILES[@]}"; do
+  add_entry "$CONFIG_TEMPLATE_ROOT/$name" "$TARGET/.ai-config/$name"
+done
+
 CONFLICTS=0
 for index in "${!SOURCES[@]}"; do
   source_path="${SOURCES[$index]}"
   destination="${DESTINATIONS[$index]}"
+  if [[ "$destination" == "$TARGET/.ai-config/"* && -e "$destination" ]]; then
+    continue
+  fi
   if [[ -e "$destination" || -L "$destination" ]] && ! [[ "$source_path" -ef "$destination" ]]; then
     if [[ -f "$source_path" && -f "$destination" ]] && cmp -s "$source_path" "$destination"; then
       continue
@@ -71,6 +82,9 @@ fi
 for index in "${!SOURCES[@]}"; do
   source_path="${SOURCES[$index]}"
   destination="${DESTINATIONS[$index]}"
+  if [[ "$destination" == "$TARGET/.ai-config/"* && -e "$destination" ]]; then
+    continue
+  fi
   if [[ "$DRY_RUN" -eq 1 ]]; then
     echo "copy: ${destination#$TARGET/}"
     continue
