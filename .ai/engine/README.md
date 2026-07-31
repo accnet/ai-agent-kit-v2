@@ -30,7 +30,7 @@ python .ai/engine/ai_kit.py runner list
 python .ai/engine/ai_kit.py add-task T3 --title "Ship order API" --owner backend --phase build --acceptance "..." --context ordering --epic checkout-revamp
 python .ai/engine/ai_kit.py add-task T4 --title "Read API contract" --owner backend --phase build --acceptance "..." --depends-on .ai/engine/state-schema.md --depends-on .ai/engine/README.md
 python .ai/engine/ai_kit.py epics
-python .ai/engine/ai_kit.py dispatch-ready --runner claude --limit 3 --context ordering
+python .ai/engine/ai_kit.py dispatch-ready --runner copilot-cli --model gpt-5.6-luna --limit 3 --context ordering
 python .ai/engine/ai_kit.py context add ordering --path "src/ordering/**/*" --owner backend --force
 python .ai/engine/ai_kit.py epic add checkout-revamp --spec .ai-work/plan/checkout-revamp-spec.md --owner planner
 python .ai/engine/ai_kit.py epic add checkout-revamp --spec .ai-work/plan/checkout-revamp-spec.md --owner planner --force
@@ -59,19 +59,34 @@ commands. Use `onboard --apply` only after reviewing the output; it backs up
 `.ai/kit.yaml` before updating it. A custom `--state /path/name.json` uses
 `/path/name/` as its isolated artifact and audit workspace.
 
-Runner profiles live in `.ai/runners.yaml`. Each profile has a required
-`command` template and optional `model`, `provider`, and `description`
-fields. A top-level `default_executor: <name>` scalar names the one profile
-`dispatch-ready` is allowed to run automatically. `runner add` refuses to
-overwrite an existing profile unless `--force` is supplied; `--default` sets
-(overwrites) `default_executor` to the profile being added. `runner list`
-returns `{"default_executor": ..., "runners": {...}}`.
-`--runner` is optional on both `dispatch` and `dispatch-ready`, falling back
-to `default_executor` when omitted. Explicit `dispatch <id> --runner X`
-always runs any named profile. `dispatch-ready` only ever runs the
-configured `default_executor` — passing `--runner X` where `X` differs from
-it is an error, checked before claiming any task. Use explicit `dispatch`
-to run a profile that isn't the default.
+Runner profiles live in `.ai/runners.yaml`. The canonical shape is one
+profile per CLI/provider, with a command template and a `models` allowlist:
+
+```yaml
+default_executor: copilot-cli
+default_model: gpt-5.6-luna
+
+runners:
+  copilot-cli:
+    command: "copilot -p {prompt} --model {model} --allow-all-tools --log-level error"
+    models: [gpt-5.6-luna, gpt-4o, gpt-4o-mini]
+    provider: copilot-cli
+```
+
+Use `ai-kit dispatch <id> --runner copilot-cli --model gpt-4o`. A runner with
+one model selects it automatically; a runner with multiple models requires
+`--model` unless it is the configured default runner, which uses
+`default_model`. A model must be listed before the task is claimed. Commands with
+models must contain `{model}`; model-less CLIs such as Claude may omit both
+`models` and `{model}`.
+
+`default_executor` and `default_model` form the automatic dispatch pair.
+`dispatch-ready` rejects a different runner or model before claiming work.
+The optional `runner_aliases` section keeps old names such as
+`copilot-gpt-5.6-luna` working. `runner list` returns default settings,
+profiles, and aliases. `runner add` supports `--models MODEL...` for grouped
+profiles, legacy `--model MODEL`, and `--default-model MODEL`; it preserves
+existing aliases and grouped profiles.
 
 `context` (registered via `.ai/contexts.yaml`) scopes tasks to a service or
 bounded context (`api`, `ui`, `database`, ...); `--context` filters

@@ -1,14 +1,15 @@
 #!/usr/bin/env bash
-# Install this nested AI-Kit into its parent project directory.
+# Install AI-Kit from a self-contained .ai directory into a project.
 set -euo pipefail
 
-SOURCE="$(cd "$(dirname "$0")/../.." && pwd)"
-TARGET="$(cd "$SOURCE/.." && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+AI_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+TARGET="$(cd "$AI_ROOT/.." && pwd)"
 FORCE=0
 DRY_RUN=0
 
 usage() {
-  echo "Usage: bash ai-kit/.ai/install/install.sh [--target <project-root>] [--force] [--dry-run]"
+  echo "Usage: bash .ai/install/install.sh [--target <project-root>] [--force] [--dry-run]"
 }
 
 while [[ $# -gt 0 ]]; do
@@ -21,38 +22,44 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-[[ "$TARGET" != "$SOURCE" ]] || { echo "Target cannot be the kit directory." >&2; exit 2; }
+[[ "$TARGET" != "$AI_ROOT" ]] || { echo "Target cannot be the .ai directory." >&2; exit 2; }
 
-PATHS=(AGENTS.md CLAUDE.md GEMINI.md ANTIGRAVITY.md .agents .ai .claude .cursor .githooks .windsurf .github/copilot-instructions.md .github/workflows/gates.yml)
-FILES=()
-for item in "${PATHS[@]}"; do
-  source_path="$SOURCE/$item"
-  [[ -e "$source_path" ]] || continue
-  if [[ -d "$source_path" ]]; then
-    while IFS= read -r -d '' file; do FILES+=("$file"); done < <(find "$source_path" \( -type f -o -type l \) -print0)
-  else
-    FILES+=("$source_path")
+TEMPLATE_ROOT="$AI_ROOT/install/templates"
+PROJECT_ROOT="$(cd "$AI_ROOT/.." && pwd)"
+SOURCES=()
+DESTINATIONS=()
+
+add_entry() {
+  SOURCES+=("$1")
+  DESTINATIONS+=("$2")
+}
+
+# The complete .ai tree is the install source. This makes copying only .ai
+# sufficient; root-level adapters are materialized from templates below.
+while IFS= read -r -d '' file; do
+  rel="${file#$AI_ROOT/}"
+  if git -C "$PROJECT_ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    git -C "$PROJECT_ROOT" check-ignore -q -- ".ai/$rel" && continue
   fi
-done
+  add_entry "$file" "$TARGET/.ai/$rel"
+done < <(find "$AI_ROOT" \( -type f -o -type l \) -print0)
 
-# Drop build artifacts / local-only config that happen to live under a
-# managed path (__pycache__, .claude/settings.local.json, ...) but keep
-# untracked-yet-real files, so this only relies on .gitignore, not history.
-if git -C "$SOURCE" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-  KEPT=()
-  for file in "${FILES[@]}"; do
-    rel="${file#$SOURCE/}"
-    git -C "$SOURCE" check-ignore -q -- "$rel" || KEPT+=("$file")
-  done
-  FILES=("${KEPT[@]}")
-fi
+# Root-level files are generated from templates owned by .ai.
+add_entry "$AI_ROOT/install/AGENTS.md" "$TARGET/AGENTS.md"
+while IFS= read -r -d '' file; do
+  rel="${file#$TEMPLATE_ROOT/}"
+  add_entry "$file" "$TARGET/$rel"
+done < <(find "$TEMPLATE_ROOT" \( -type f -o -type l \) -print0)
 
 CONFLICTS=0
-for file in "${FILES[@]}"; do
-  rel="${file#$SOURCE/}"
-  dest="$TARGET/$rel"
-  if [[ -f "$dest" ]] && ! cmp -s "$file" "$dest"; then
-    echo "conflict: $rel" >&2
+for index in "${!SOURCES[@]}"; do
+  source_path="${SOURCES[$index]}"
+  destination="${DESTINATIONS[$index]}"
+  if [[ -e "$destination" || -L "$destination" ]] && ! [[ "$source_path" -ef "$destination" ]]; then
+    if [[ -f "$source_path" && -f "$destination" ]] && cmp -s "$source_path" "$destination"; then
+      continue
+    fi
+    echo "conflict: ${destination#$TARGET/}" >&2
     CONFLICTS=1
   fi
 done
@@ -61,12 +68,16 @@ if [[ "$CONFLICTS" -eq 1 && "$FORCE" -ne 1 ]]; then
   exit 1
 fi
 
-for file in "${FILES[@]}"; do
-  rel="${file#$SOURCE/}"
-  dest="$TARGET/$rel"
-  if [[ "$DRY_RUN" -eq 1 ]]; then echo "copy: $rel"; continue; fi
-  mkdir -p "$(dirname "$dest")"
-  cp "$file" "$dest"
+for index in "${!SOURCES[@]}"; do
+  source_path="${SOURCES[$index]}"
+  destination="${DESTINATIONS[$index]}"
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    echo "copy: ${destination#$TARGET/}"
+    continue
+  fi
+  [[ "$source_path" -ef "$destination" ]] && continue
+  mkdir -p "$(dirname "$destination")"
+  cp -P "$source_path" "$destination"
 done
 
 if [[ "$DRY_RUN" -eq 0 ]]; then

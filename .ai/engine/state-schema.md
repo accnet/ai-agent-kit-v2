@@ -134,7 +134,7 @@ attempt.
 physical agent instance is executing, stored as `claimed_by: "role#agent_id"`
 so multiple concurrent agents sharing one role (e.g. three `backend`
 workers) remain distinguishable in the audit trail. `dispatch-ready
---runner X [--limit N] [--context C] [--epic E]` atomically claims up to N
+--runner X [--model M] [--limit N] [--context C] [--epic E]` atomically claims up to N
 ready tasks (auto-generating a unique `agent_id` per task if none is given)
 and spawns each task's runner as a detached background process, so N
 claimed tasks execute concurrently rather than one dispatch call blocking
@@ -150,24 +150,27 @@ it is never an independent source of lifecycle truth.
 
 ## Runner registry
 
-`.ai/runners.yaml` is the versioned runner registry. Each entry requires a
-`command` template containing `{prompt}` and may include `model`, `provider`,
-and `description`. A top-level `default_executor: <name>` scalar names the
-single runner `dispatch-ready` is allowed to run automatically.
-`ai-kit runner add [--default]` and `ai-kit runner list` manage the
-registry; `runner list` returns `{"default_executor": <name-or-null>,
-"runners": {...}}`.
+`.ai/runners.yaml` is the versioned runner registry. A canonical CLI/provider
+entry has a `command` template containing `{prompt}` and `{model}`, a
+`models` allowlist, and optional `provider`/`description`. Model-less entries
+may omit `models` and `{model}`. Top-level `default_executor` and
+`default_model` identify the automatic dispatch pair. `runner_aliases` maps
+legacy profile names to `runner:model` references. Legacy scalar `model`
+profiles remain readable during migration.
+`ai-kit runner add [--default]` and `ai-kit runner list` manage the registry;
+`runner list` returns default settings, `runner_aliases`, and `runners`.
 
-`--runner` is optional on both `dispatch` and `dispatch-ready`, falling back
-to the configured `default_executor` when omitted. An explicit
-`ai-kit dispatch <id> --runner X` is permitted for any registered runner and
-records its model/provider in `dispatch_log_<id>.json`.
-`ai-kit dispatch-ready [--runner X]` is the automatic safety-sensitive path:
+`--runner` and `--model` are optional on `dispatch`; omitted values fall back
+to the configured default pair. An explicit
+`ai-kit dispatch <id> --runner X --model M` is permitted only when `M` is
+declared by X and records the resolved model/provider in
+`dispatch_log_<id>.json`.
+`ai-kit dispatch-ready [--runner X] [--model M]` is the automatic safety-sensitive path:
 it only ever runs the configured `default_executor` — an explicit `--runner
-X` that names a different runner is an `EngineError` raised before claiming
-any task, pointing at explicit `dispatch` as the alternative. A missing or
-misconfigured `default_executor` (unset, or naming a runner that isn't
-registered) also fails before claiming any task.
+X` or `--model M` that differs from the configured pair is an `EngineError`
+raised before claiming any task, pointing at explicit `dispatch` as the
+alternative. A missing or misconfigured default pair, unknown model, or
+ambiguous multi-model runner also fails before claiming any task.
 
 `dispatch`'s prompt to the runner references the tasks file and instructs
 the completion command using the *resolved* workspace for the `--state`

@@ -64,9 +64,21 @@ def _load_yaml_registry(relative_path: str, top_key: str) -> dict:
         return {}
     entries: dict[str, dict] = {}
     current = None
+    in_section = False
     header = f"{top_key}:"
     for line in path.read_text(encoding="utf-8").splitlines():
-        if not line.strip() or line.strip().startswith("#") or line.startswith(header):
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if line == header:
+            in_section = True
+            current = None
+            continue
+        if not line.startswith((" ", "\t")):
+            in_section = False
+            current = None
+            continue
+        if not in_section:
             continue
         name_match = re.match(r"^  (\S+):\s*$", line)
         if name_match:
@@ -84,6 +96,11 @@ def _load_yaml_registry(relative_path: str, top_key: str) -> dict:
                     value = json.loads(value)
                 except json.JSONDecodeError:
                     pass
+            elif value.startswith("[") and value.endswith("]"):
+                try:
+                    value = json.loads(value)
+                except json.JSONDecodeError:
+                    value = [item.strip().strip("\"'") for item in value[1:-1].split(",") if item.strip()]
             entries[current][field_match.group(1)] = value
     return entries
 
@@ -123,6 +140,38 @@ def _load_runners() -> dict:
     return _load_yaml_registry(".ai/runners.yaml", "runners")
 
 
+def _load_runner_aliases() -> dict[str, str]:
+    """Load legacy runner-name aliases from a flat YAML section."""
+    path = ROOT / ".ai" / "runners.yaml"
+    if not path.exists():
+        return {}
+    aliases: dict[str, str] = {}
+    in_section = False
+    for line in path.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if line == "runner_aliases:":
+            in_section = True
+            continue
+        if not line.startswith((" ", "\t")):
+            in_section = False
+            continue
+        if not in_section:
+            continue
+        match = re.match(r"^  (\S+):\s*(.+)$", line)
+        if not match:
+            continue
+        value = match.group(2).strip()
+        if value.startswith('"'):
+            try:
+                value = json.loads(value)
+            except json.JSONDecodeError:
+                pass
+        aliases[match.group(1)] = str(value)
+    return aliases
+
+
 def _runner_scalar(value: str) -> str:
     """Serialize a runner field without losing spaces, quotes, or ``#``."""
     return json.dumps(value, ensure_ascii=False)
@@ -146,43 +195,136 @@ def _default_executor() -> str | None:
     return None
 
 
-def _resolve_runner(explicit: str | None) -> tuple[str, dict]:
-    """Resolve an explicit --runner, or fall back to the configured default_executor.
+def _default_model() -> str | None:
+    """Read the top-level default model paired with default_executor."""
+    path = ROOT / ".ai" / "runners.yaml"
+    if not path.exists():
+        return None
+    prefix = "default_model:"
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if line.startswith(prefix):
+            value = line[len(prefix):].strip()
+            if value.startswith('"'):
+                try:
+                    value = json.loads(value)
+                except json.JSONDecodeError:
+                    pass
+            return value or None
+    return None
 
-    Returns (name, entry). Raises EngineError if neither an explicit runner
+
+def _entry_models(entry: dict) -> list[str]:
+    """Return the normalized allowlist for grouped or legacy runner entries."""
+    models = entry.get("models")
+    if isinstance(models, list):
+        values = [str(item).strip() for item in models if str(item).strip()]
+    elif isinstance(models, str) and models.strip():
+        values = [item.strip() for item in models.split(",") if item.strip()]
+    elif entry.get("model"):
+        values = [item.strip() for item in str(entry["model"]).split(",") if item.strip()]
+    else:
+        values = []
+    return list(dict.fromkeys(values))
+
+
+def _split_runner_reference(reference: str) -> tuple[str, str | None]:
+    if ":" not in reference:
+        return reference, None
+    runner, model = reference.split(":", 1)
+    if not runner or not model:
+        raise EngineError(f"invalid runner reference '{reference}'; expected <runner>:<model>")
+    return runner, model
+
+
+def _resolve_runner(explicit: str | None, requested_model: str | None = None) -> tuple[str, dict, str | None]:
+    """Resolve runner and model, or fall back to default_executor/default_model.
+
+    Returns (name, entry, model). Raises EngineError if neither an explicit runner
     nor a configured default_executor is available, if the configured
     default_executor doesn't name a registered runner (misconfiguration), or
     if the resolved name isn't registered.
     """
     runners = _load_runners()
+    aliases = _load_runner_aliases()
     default_executor = _default_executor()
-    if default_executor and default_executor not in runners:
-        raise EngineError(f"configured default_executor '{default_executor}' is not a registered runner in .ai/runners.yaml")
     name = explicit or default_executor
     if not name:
         raise EngineError(
             "no --runner given and no default_executor configured in .ai/runners.yaml; "
             "pass --runner explicitly or set one via 'ai-kit runner add <name> --default'"
         )
+    alias_target = aliases.get(name)
+    if alias_target:
+        name, alias_model = _split_runner_reference(alias_target)
+        if requested_model and alias_model and requested_model != alias_model:
+            raise EngineError(f"runner alias '{explicit}' fixes model '{alias_model}', not '{requested_model}'")
+        requested_model = requested_model or alias_model
+    else:
+        name, reference_model = _split_runner_reference(name)
+        if requested_model and reference_model and requested_model != reference_model:
+            raise EngineError(f"runner reference '{explicit}' fixes model '{reference_model}', not '{requested_model}'")
+        requested_model = requested_model or reference_model
     if name not in runners:
-        raise EngineError(f"unknown runner profile: {name}. Available: {', '.join(runners.keys())}")
-    return name, runners[name]
+        available = ", ".join([*runners.keys(), *aliases.keys()])
+        raise EngineError(f"unknown runner profile or alias: {explicit or default_executor}. Available: {available}")
+    entry = runners[name]
+    models = _entry_models(entry)
+    selected_model = requested_model
+    if selected_model is None and name == default_executor:
+        selected_model = _default_model()
+    if selected_model is None and len(models) == 1:
+        selected_model = models[0]
+    if selected_model is None and len(models) > 1:
+        raise EngineError(f"runner '{name}' supports multiple models; pass --model explicitly")
+    if selected_model is not None and not models:
+        raise EngineError(f"runner '{name}' does not declare selectable models")
+    if selected_model is not None and selected_model not in models:
+        raise EngineError(f"model '{selected_model}' is not configured for runner '{name}'. Available: {', '.join(models)}")
+    if selected_model is None and "{model}" in entry.get("command", ""):
+        raise EngineError(f"runner '{name}' command requires a model but no model was selected")
+    if models and "{model}" not in entry.get("command", ""):
+        raise EngineError(f"runner '{name}' declares models but its command is missing the {{model}} placeholder")
+    return name, entry, selected_model
 
 
-def _write_runners(runners: dict[str, dict], default_executor: str | None) -> None:
+def _write_runners(
+    runners: dict[str, dict],
+    default_executor: str | None,
+    default_model: str | None,
+    aliases: dict[str, str],
+) -> None:
     path = ROOT / ".ai" / "runners.yaml"
     lines = []
     if default_executor:
         lines.append(f"default_executor: {_runner_scalar(default_executor)}")
+        if default_model:
+            lines.append(f"default_model: {_runner_scalar(default_model)}")
         lines.append("")
     lines.append("runners:")
     for name, fields in sorted(runners.items()):
         lines.append(f"  {name}:")
         lines.append(f"    command: {_runner_scalar(fields['command'])}")
+        if fields.get("models"):
+            models = _entry_models(fields)
+            lines.append(f"    models: {json.dumps(models, ensure_ascii=False)}")
         for key in ("model", "provider", "description"):
             if fields.get(key) is not None and fields.get(key) != "":
                 lines.append(f"    {key}: {_runner_scalar(str(fields[key]))}")
+    if aliases:
+        lines.extend(["", "runner_aliases:"])
+        for name, target in sorted(aliases.items()):
+            lines.append(f"  {name}: {_runner_scalar(target)}")
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _render_runner_command(template: str, prompt: str, model: str | None) -> str:
+    """Render prompt/model placeholders with shell-safe quoting."""
+    command = template.replace("{prompt}", shlex.quote(prompt))
+    if model is not None:
+        command = command.replace("{model}", shlex.quote(model))
+    if "{model}" in command:
+        raise EngineError("runner command still contains {model}; select a model before dispatch")
+    return command
 
 
 def _git_head() -> str | None:
@@ -821,21 +963,55 @@ def cmd_context_list(args: argparse.Namespace) -> dict:
 
 def cmd_runner_add(args: argparse.Namespace) -> dict:
     runners = _load_runners()
+    aliases = _load_runner_aliases()
+    requested_model = getattr(args, "model", None)
+    requested_models = getattr(args, "models", None)
+    requested_default_model = getattr(args, "default_model", None)
+    if requested_model and requested_models:
+        raise EngineError("use either --model or --models, not both")
+    if requested_models:
+        requested_models = list(dict.fromkeys(requested_models))
+        if "{model}" not in args.command:
+            raise EngineError("--models requires a command containing the {model} placeholder")
     if args.name in runners and not args.force:
         raise EngineError(f"runner already registered: {args.name}; use --force to update it")
     runners[args.name] = {
         "command": args.command,
-        "model": args.model or "",
         "provider": args.provider or "",
         "description": args.description or "",
     }
+    if requested_models:
+        runners[args.name]["models"] = requested_models
+    elif requested_model:
+        runners[args.name]["model"] = requested_model
     default_executor = args.name if args.default else _default_executor()
-    _write_runners(runners, default_executor)
-    return {"name": args.name, "default_executor": default_executor, **runners[args.name]}
+    default_model = requested_default_model if requested_default_model is not None else _default_model()
+    if args.default and requested_default_model is None:
+        models = _entry_models(runners[args.name])
+        default_model = models[0] if len(models) == 1 else None
+    if default_model and default_executor:
+        target_name, target_reference_model = _split_runner_reference(default_executor)
+        target_name = aliases.get(target_name, target_name)
+        target_name, alias_model = _split_runner_reference(target_name)
+        target_entry = runners.get(target_name)
+        target_models = _entry_models(target_entry or {})
+        if target_models and default_model not in target_models:
+            raise EngineError(
+                f"default_model '{default_model}' is not configured for default_executor '{default_executor}'"
+            )
+    if args.default and len(_entry_models(runners[args.name])) > 1 and not default_model:
+        raise EngineError("--default requires --default-model when the runner has multiple models")
+    _write_runners(runners, default_executor, default_model, aliases)
+    return {"name": args.name, "default_executor": default_executor, "default_model": default_model, **runners[args.name]}
 
 
 def cmd_runner_list(args: argparse.Namespace) -> dict:
-    return {"default_executor": _default_executor(), "runners": _load_runners()}
+    return {
+        "default_executor": _default_executor(),
+        "default_model": _default_model(),
+        "runner_aliases": _load_runner_aliases(),
+        "runners": _load_runners(),
+    }
 
 
 def cmd_epic_add(args: argparse.Namespace) -> dict:
@@ -1139,7 +1315,7 @@ def cmd_dispatch(args: argparse.Namespace) -> dict:
     task = task_map(state).get(args.id)
     if not task:
         raise EngineError(f"unknown task: {args.id}")
-    runner_name, runner = _resolve_runner(args.runner)
+    runner_name, runner, selected_model = _resolve_runner(args.runner, args.model)
     template = runner["command"]
     # The State Manager, not the runner, owns lifecycle transitions: claim the
     # task (todo -> in-progress) here so the runner only ever needs to report
@@ -1151,16 +1327,17 @@ def cmd_dispatch(args: argparse.Namespace) -> dict:
         raise EngineError(f"cannot dispatch {task['id']} from status {task['status']} (must be todo or in-progress)")
     tasks_md = display_path(workspace(state_path(args.state)) / "tasks" / "tasks.md")
     state_flag = f" --state {args.state}" if args.state else ""
-    prompt = f"Bạn là {task['owner']}. Thực thi task {task['id']} theo yêu cầu trong {tasks_md}. Không vi phạm AGENTS.md. Xong việc gọi lệnh: bash .ai/scripts/ai-kit{state_flag} transition {task['id']} complete --actor {task['owner']} --detail 'Hoàn thành bởi {runner_name}'"
+    runner_label = f"{runner_name}/{selected_model}" if selected_model else runner_name
+    prompt = f"Bạn là {task['owner']}. Thực thi task {task['id']} theo yêu cầu trong {tasks_md}. Không vi phạm AGENTS.md. Xong việc gọi lệnh: bash .ai/scripts/ai-kit{state_flag} transition {task['id']} complete --actor {task['owner']} --detail 'Hoàn thành bởi {runner_label}'"
     # Runner templates hold {prompt} unquoted; shlex.quote is the single
     # place quoting happens, so a template can never double-quote it.
-    cmd = template.replace("{prompt}", shlex.quote(prompt))
-    print(f"Dispatching task {task['id']} to runner '{runner_name}'...", file=sys.stderr)
+    cmd = _render_runner_command(template, prompt, selected_model)
+    print(f"Dispatching task {task['id']} to runner '{runner_label}'...", file=sys.stderr)
     result = _sp.run(cmd, shell=True, cwd=str(ROOT))
     # Audit log
     audit = {
         "ts": now(), "task": task["id"], "runner": runner_name,
-        "model": runner.get("model") or None,
+        "model": selected_model,
         "provider": runner.get("provider") or None,
         "command": cmd, "exit_code": result.returncode,
     }
@@ -1183,7 +1360,6 @@ def cmd_dispatch_ready(args: argparse.Namespace) -> dict:
     """
     import subprocess as _sp
     state = load(state_path(args.state)); validate(state)
-    runners = _load_runners()
     default_executor = _default_executor()
     if not default_executor:
         raise EngineError(
@@ -1191,15 +1367,18 @@ def cmd_dispatch_ready(args: argparse.Namespace) -> dict:
             "set one via 'ai-kit runner add <name> --default', or use "
             "'ai-kit dispatch <id> --runner <name>' for explicit dispatch"
         )
-    if default_executor not in runners:
-        raise EngineError(f"configured default_executor '{default_executor}' is not a registered runner in .ai/runners.yaml")
     if args.runner and args.runner != default_executor:
         raise EngineError(
             f"dispatch-ready only runs the configured default_executor ('{default_executor}'), "
             f"not '{args.runner}'; use 'ai-kit dispatch <id> --runner {args.runner}' for explicit dispatch"
         )
-    runner_name = default_executor
-    runner = runners[runner_name]
+    configured_default_model = _default_model()
+    if args.model and configured_default_model and args.model != configured_default_model:
+        raise EngineError(
+            f"dispatch-ready only runs the configured default_model ('{configured_default_model}'), "
+            f"not '{args.model}'; use explicit dispatch for another model"
+        )
+    runner_name, runner, selected_model = _resolve_runner(args.runner, args.model)
     tasks = task_map(state)
     candidates = [t for t in state["tasks"] if runnable(t, tasks)]
     if args.context:
@@ -1226,6 +1405,8 @@ def cmd_dispatch_ready(args: argparse.Namespace) -> dict:
         if args.state:
             cmd += ["--state", args.state]
         cmd += ["dispatch", entry["task"], "--runner", runner_name, "--agent-id", entry["agent_id"]]
+        if selected_model is not None:
+            cmd += ["--model", selected_model]
         # Redirect the child's stdout/stderr to its own log file instead of
         # inheriting this process's fds: an inherited pipe stays open (and a
         # caller reading dispatch-ready's own output can hang or see
@@ -1307,8 +1488,8 @@ def parser() -> argparse.ArgumentParser:
     trans = sub.add_parser("transition"); trans.add_argument("id"); trans.add_argument("action", choices=TRANSITIONS); trans.add_argument("--actor", required=True); trans.add_argument("--detail"); trans.add_argument("--evidence", nargs="+"); trans.add_argument("--expected-revision", type=int); trans.add_argument("--agent-id", help="unique identity of the agent instance, appended to claimed_by as 'actor#agent_id' for audit when multiple agents share a role"); trans.set_defaults(fn=cmd_transition)
     approve = sub.add_parser("approve"); approve.add_argument("id"); approve.add_argument("--role", choices=["qa", "review"], required=True); approve.add_argument("--status"); approve.add_argument("--reason", required=True); approve.set_defaults(fn=cmd_approve)
     verify = sub.add_parser("verify"); verify.add_argument("id"); verify.set_defaults(fn=cmd_verify)
-    dispatch = sub.add_parser("dispatch"); dispatch.add_argument("id"); dispatch.add_argument("--runner"); dispatch.add_argument("--agent-id"); dispatch.set_defaults(fn=cmd_dispatch)
-    dispatch_ready = sub.add_parser("dispatch-ready"); dispatch_ready.add_argument("--runner"); dispatch_ready.add_argument("--limit", type=int); dispatch_ready.add_argument("--context"); dispatch_ready.add_argument("--epic"); dispatch_ready.add_argument("--agent-id"); dispatch_ready.set_defaults(fn=cmd_dispatch_ready)
+    dispatch = sub.add_parser("dispatch"); dispatch.add_argument("id"); dispatch.add_argument("--runner"); dispatch.add_argument("--model"); dispatch.add_argument("--agent-id"); dispatch.set_defaults(fn=cmd_dispatch)
+    dispatch_ready = sub.add_parser("dispatch-ready"); dispatch_ready.add_argument("--runner"); dispatch_ready.add_argument("--model"); dispatch_ready.add_argument("--limit", type=int); dispatch_ready.add_argument("--context"); dispatch_ready.add_argument("--epic"); dispatch_ready.add_argument("--agent-id"); dispatch_ready.set_defaults(fn=cmd_dispatch_ready)
     route = sub.add_parser("route"); route.add_argument("id"); route.set_defaults(fn=cmd_route)
     status = sub.add_parser("status"); status.add_argument("--context"); status.add_argument("--epic"); status.set_defaults(fn=cmd_status)
     timeline = sub.add_parser("timeline"); timeline.set_defaults(fn=cmd_timeline)
@@ -1319,7 +1500,7 @@ def parser() -> argparse.ArgumentParser:
     context_add = context_sub.add_parser("add"); context_add.add_argument("name"); context_add.add_argument("--path", required=True); context_add.add_argument("--owner", required=True); context_add.add_argument("--force", action="store_true", help="update an existing context, bumping its revision"); context_add.set_defaults(fn=cmd_context_add)
     context_list = context_sub.add_parser("list"); context_list.set_defaults(fn=cmd_context_list)
     runner = sub.add_parser("runner"); runner_sub = runner.add_subparsers(dest="runner_command", required=True)
-    runner_add = runner_sub.add_parser("add"); runner_add.add_argument("name"); runner_add.add_argument("--command", required=True); runner_add.add_argument("--model"); runner_add.add_argument("--provider"); runner_add.add_argument("--description"); runner_add.add_argument("--default", action="store_true"); runner_add.add_argument("--force", action="store_true"); runner_add.set_defaults(fn=cmd_runner_add)
+    runner_add = runner_sub.add_parser("add"); runner_add.add_argument("name"); runner_add.add_argument("--command", required=True); runner_add.add_argument("--model"); runner_add.add_argument("--models", nargs="+"); runner_add.add_argument("--provider"); runner_add.add_argument("--description"); runner_add.add_argument("--default-model"); runner_add.add_argument("--default", action="store_true"); runner_add.add_argument("--force", action="store_true"); runner_add.set_defaults(fn=cmd_runner_add)
     runner_list = runner_sub.add_parser("list"); runner_list.set_defaults(fn=cmd_runner_list)
     epics = sub.add_parser("epics"); epics.set_defaults(fn=cmd_epics)
     epic = sub.add_parser("epic"); epic_sub = epic.add_subparsers(dest="epic_command", required=True)

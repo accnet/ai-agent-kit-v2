@@ -1,52 +1,57 @@
-<# Install this nested AI-Kit into its parent project directory. #>
+<# Install AI-Kit from a self-contained .ai directory into a project. #>
 [CmdletBinding()]
 param(
-    [string]$Target = (Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $PSScriptRoot))),
+    [string]$Target = (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)),
     [switch]$Force,
     [switch]$DryRun
 )
 
-$source = (Resolve-Path (Join-Path $PSScriptRoot '../..')).Path
+$aiRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $targetPath = (Resolve-Path $Target).Path
-if ($source -eq $targetPath) { throw 'Target cannot be the kit directory.' }
+$projectRoot = (Split-Path -Parent $aiRoot)
+if ($targetPath -eq $aiRoot) { throw 'Target cannot be the .ai directory.' }
 
-$items = @('AGENTS.md','CLAUDE.md','GEMINI.md','ANTIGRAVITY.md','.agents','.ai','.claude','.cursor','.githooks','.windsurf','.github/copilot-instructions.md','.github/workflows/gates.yml')
-$files = foreach ($item in $items) {
-    $path = Join-Path $source $item
-    if (Test-Path -LiteralPath $path -PathType Container) { Get-ChildItem -LiteralPath $path -Recurse -File }
-    elseif (Test-Path -LiteralPath $path -PathType Leaf) { Get-Item -LiteralPath $path }
+$entries = New-Object System.Collections.Generic.List[object]
+function Add-Entry([string]$Source, [string]$Destination) {
+    $entries.Add([pscustomobject]@{ Source = $Source; Destination = $Destination })
 }
 
-# Drop build artifacts / local-only config that happen to live under a
-# managed path (__pycache__, .claude/settings.local.json, ...) but keep
-# untracked-yet-real files, so this only relies on .gitignore, not history.
-$isGitRepo = $false
-try { git -C $source rev-parse --is-inside-work-tree 2>$null | Out-Null; $isGitRepo = ($LASTEXITCODE -eq 0) } catch { $isGitRepo = $false }
-if ($isGitRepo) {
-    $files = $files | Where-Object {
-        $relative = $_.FullName.Substring($source.Length).TrimStart('\','/')
-        git -C $source check-ignore -q -- $relative
-        $LASTEXITCODE -ne 0
+# The complete .ai tree is the install source. Root-level adapters are added
+# from templates owned by .ai below.
+Get-ChildItem -LiteralPath $aiRoot -Recurse -File -Force | ForEach-Object {
+    $relative = $_.FullName.Substring($aiRoot.Length).TrimStart('\','/')
+    $destination = Join-Path (Join-Path $targetPath '.ai') $relative
+    Add-Entry $_.FullName $destination
+}
+
+Add-Entry (Join-Path $aiRoot 'install/AGENTS.md') (Join-Path $targetPath 'AGENTS.md')
+$templateRoot = Join-Path $aiRoot 'install/templates'
+Get-ChildItem -LiteralPath $templateRoot -Recurse -File -Force | ForEach-Object {
+    $relative = $_.FullName.Substring($templateRoot.Length).TrimStart('\','/')
+    Add-Entry $_.FullName (Join-Path $targetPath $relative)
+}
+
+$conflicts = New-Object System.Collections.Generic.List[string]
+foreach ($entry in $entries) {
+    if (-not (Test-Path -LiteralPath $entry.Destination)) { continue }
+    $samePath = [IO.Path]::GetFullPath($entry.Source) -eq [IO.Path]::GetFullPath($entry.Destination)
+    if ($samePath) { continue }
+    if ((Get-FileHash -LiteralPath $entry.Source).Hash -ne (Get-FileHash -LiteralPath $entry.Destination).Hash) {
+        $relative = $entry.Destination.Substring($targetPath.Length).TrimStart('\','/')
+        $conflicts.Add($relative)
     }
-}
-
-$conflicts = @()
-foreach ($file in $files) {
-    $relative = $file.FullName.Substring($source.Length).TrimStart('\','/')
-    $destination = Join-Path $targetPath $relative
-    if ((Test-Path -LiteralPath $destination) -and -not ((Get-FileHash -LiteralPath $file.FullName).Hash -eq (Get-FileHash -LiteralPath $destination).Hash)) { $conflicts += $relative }
 }
 if ($conflicts.Count -gt 0 -and -not $Force) {
     $conflicts | ForEach-Object { Write-Error "conflict: $_" }
     throw 'Installation stopped. Re-run with -Force to replace managed files.'
 }
 
-foreach ($file in $files) {
-    $relative = $file.FullName.Substring($source.Length).TrimStart('\','/')
-    $destination = Join-Path $targetPath $relative
+foreach ($entry in $entries) {
+    $relative = $entry.Destination.Substring($targetPath.Length).TrimStart('\','/')
     if ($DryRun) { Write-Output "copy: $relative"; continue }
-    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $destination) | Out-Null
-    Copy-Item -LiteralPath $file.FullName -Destination $destination -Force
+    if ([IO.Path]::GetFullPath($entry.Source) -eq [IO.Path]::GetFullPath($entry.Destination)) { continue }
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $entry.Destination) | Out-Null
+    Copy-Item -LiteralPath $entry.Source -Destination $entry.Destination -Force
 }
 
 if (-not $DryRun) {
