@@ -1122,7 +1122,9 @@ def cmd_approve(args: argparse.Namespace) -> dict:
     verdict_key = "status" if args.role == "qa" else "verdict"
     payload = {"kind": args.role, "task": task["id"], "ts": now(), verdict_key: status, "reason": args.reason}
     root = workspace(state_path(args.state))
-    evidence_path = root / f"{args.role}_evidence_{task['id']}.json"
+    evidence_dir = root / "evidence"
+    evidence_dir.mkdir(parents=True, exist_ok=True)
+    evidence_path = evidence_dir / f"{args.role}_evidence_{task['id']}.json"
     evidence_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
     args.action = action
     args.evidence = [evidence_path.as_posix()]

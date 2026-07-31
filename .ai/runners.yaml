@@ -1,4 +1,4 @@
-default_executor: "codex-5.6-luna"
+default_executor: "opencode-deepseek-v4-pro"
 
 runners:
   claude:
@@ -20,6 +20,10 @@ runners:
     model: "gpt-5.6-luna"
     provider: "codex-cli"
     description: "Codex Luna runner"
+  gemini:
+    command: "gemini -y -p {prompt}"
+    provider: "gemini-cli"
+    description: "Gemini CLI runner"
   deepseek-v4-flash:
     command: "cline -P deepseek -m 'deepseek-v4-flash' --auto-approve true {prompt}"
     model: "deepseek-v4-flash"
