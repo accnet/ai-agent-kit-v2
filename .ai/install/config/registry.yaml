@@ -49,16 +49,63 @@ stack_skills:
   ai-ai-cost-management: {path: .ai/skills/ai/ai-cost-management, stack: [cost, llm, ai]}
 
 skill_triggers:
+  # AGENTS.md's mandatory-concerns table (the general one, not the AI-specific
+  # table below it) had no trigger implementing three of its rows: auth,
+  # UI interaction, and new/upgraded dependencies never actually routed to
+  # Security/Frontend/DevOps regardless of task content. These three close
+  # that gap.
+  auth-security:
+    match: ["auth", "oauth", "login", "logout", "sso", "jwt", "password", "credential", "permission", "authoriz", "rbac", "session token", "access token", "refresh token", "sensitive data", "pii", "untrusted input", "encryption"]
+    core_skills: ["security-review", "threat-modeling"]
+    technology_skills: []
+    reason: "Auth, permissions, credentials, or sensitive/untrusted data require a security review pass (AGENTS.md mandatory concerns)."
+  ui-interaction:
+    match: ["ui component", "button", "modal", "dialog", "dropdown", "form field", "accessibility", "aria", "screen reader", "keyboard navigation", "responsive layout"]
+    core_skills: ["accessibility", "frontend-core"]
+    technology_skills: []
+    reason: "UI interaction changes require accessibility and frontend-core review (AGENTS.md mandatory concerns)."
+  dependency-change:
+    match: ["upgrade", "bump", "dependency", "package version", "npm install", "pip install", "new dependency", "third-party package", "add a library"]
+    core_skills: ["dependency-management"]
+    technology_skills: []
+    reason: "New or upgraded dependencies require a dependency-management review pass (AGENTS.md mandatory concerns)."
+  coordination-handoff:
+    match: ["parallel task", "parallel work", "parallel agent", "concurrent task", "concurrent worker", "blocked work", "handoff", "hand-off", "task retry"]
+    core_skills: ["workflow-orchestration"]
+    technology_skills: []
+    reason: "Parallel tasks, blocked work, and handoffs require explicit workflow-orchestration coordination (AGENTS.md mandatory concerns)."
+  user-journey-boundary:
+    match: ["user journey", "end-to-end", "e2e", "public api", "api boundary", "event boundary", "public endpoint"]
+    core_skills: ["e2e-testing", "contract-testing"]
+    technology_skills: []
+    reason: "User journeys and public API/event boundaries require end-to-end and contract test coverage (AGENTS.md mandatory concerns)."
+  architecture-tradeoff:
+    match: ["cross-cutting", "trade-off", "tradeoff", "architectural decision", "durable decision", "design decision"]
+    core_skills: ["architecture-decisions"]
+    technology_skills: []
+    reason: "Cross-cutting or durable trade-offs require an explicit architecture-decisions record (AGENTS.md mandatory concerns). Kept separate from architecture-pipeline below: that one matches the bare word 'architecture', which is not a substring of 'architectural' -- this trigger covers the word forms AGENTS.md's own row actually uses."
   prompt-injection:
     match: ["prompt injection", "jailbreak", "system prompt leak", "tool abuse"]
     core_skills: ["threat-modeling", "security-review"]
     technology_skills: ["ai/ai-safety"]
     reason: "Untrusted prompt content or instruction override risk requires AI safety and threat controls."
-  latency-cost-token:
-    match: ["latency", "slow response", "p95", "token", "cost", "spend", "throughput"]
+  # Split from a single "latency-cost-token" trigger: that trigger matched bare
+  # "token" and "cost", which fired on ANY task mentioning a "refresh token" or
+  # having a dollar "cost" -- e.g. an OAuth task pulled in ai/ai-cost-management
+  # purely because it said "token refresh". performance-latency now covers
+  # AGENTS.md's generic Performance row (latency/throughput/memory/query
+  # volume) without forcing in AI-specific skills; ai-cost-token is scoped to
+  # phrases that only make sense for LLM token/cost pressure.
+  performance-latency:
+    match: ["latency", "slow response", "p95", "p99", "throughput", "query volume", "memory pressure"]
+    core_skills: ["performance-profiling", "observability"]
+    technology_skills: []
+    reason: "Latency/throughput/memory/query-volume concerns require measured baselines and observability (AGENTS.md Performance row)."
+  ai-cost-token:
+    match: ["token budget", "token limit", "token usage", "prompt tokens", "completion tokens", "context window", "llm cost", "inference cost", "api spend", "token cost", "cost per request"]
     core_skills: ["performance-profiling", "observability"]
     technology_skills: ["ai/llm-observability", "ai/ai-cost-management"]
-    reason: "Performance/cost keywords require measurable budgets and AI telemetry."
+    reason: "LLM token/cost pressure requires AI cost telemetry in addition to standard performance controls."
   evaluation:
     match: ["evaluation", "benchmark", "quality score", "regression set", "hallucination rate"]
     core_skills: ["test-and-validation", "e2e-testing"]
@@ -88,17 +135,17 @@ skill_triggers:
 owners:
   planner: []
   researcher: []
-  architect: []
+  architect: [ai]
   backend: [backend, database, ai]
   frontend: [frontend]
   database: [database]
   devops: [devops]
-  qa: [testing]
+  qa: [testing, ai]
   reviewer: []
   document: []
   release: [devops]
-  security: []
-  integration: []
-  performance: []
+  security: [ai]
+  integration: [ai]
+  performance: [ai]
   router: []
   scheduler: []
