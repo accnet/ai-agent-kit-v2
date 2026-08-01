@@ -848,6 +848,12 @@ class RealRegistryTriggerTests(unittest.TestCase):
         ("performance-latency", "throughput", "observability"),
         ("ai-cost-token", "token budget", "performance-profiling"),
         ("ai-cost-token", "llm cost", "observability"),
+        ("coordination-handoff", "handoff", "workflow-orchestration"),
+        ("coordination-handoff", "parallel task", "workflow-orchestration"),
+        ("user-journey-boundary", "user journey", "e2e-testing"),
+        ("user-journey-boundary", "public api", "contract-testing"),
+        ("architecture-tradeoff", "cross-cutting", "architecture-decisions"),
+        ("architecture-tradeoff", "trade-off", "architecture-decisions"),
     ]
 
     def _load_triggers_from(self, registry_path: Path) -> dict:
@@ -905,6 +911,39 @@ class RealRegistryTriggerTests(unittest.TestCase):
             self.assertEqual(triggers["performance-latency"]["technology_skills"], [])
             self.assertTrue(triggers["ai-cost-token"]["technology_skills"])
 
+    def test_no_dead_ai_triggers_block(self) -> None:
+        """ai_triggers: was documented in skill-router/SKILL.md as live
+        engine behavior ("routes the ai domain... automatically when the
+        stack includes an AI technology") but no script or engine code ever
+        read it -- skills-for.sh and _load_registry() both resolve AI
+        routing from the static owners: list instead. Removed as dead
+        config; this pins it gone so it can't quietly come back without
+        someone also wiring it up."""
+        for registry_path in self.REGISTRY_FILES:
+            text = registry_path.read_text(encoding="utf-8")
+            self.assertNotIn("ai_triggers:", text, f"dead ai_triggers: block reintroduced in {registry_path}")
+
+    def test_owners_section_matches_between_registry_copies(self) -> None:
+        """Regression: the install-template copy was missing 'ai' from
+        owners.{architect,qa,security,integration,performance} even though
+        the live .ai-config/registry.yaml had it -- a fresh install would
+        route less than the repo it was copied from."""
+        live_owners = self._load_owners_from(self.REGISTRY_FILES[0])
+        template_owners = self._load_owners_from(self.REGISTRY_FILES[1])
+        self.assertEqual(live_owners, template_owners)
+
+    def _load_owners_from(self, registry_path: Path) -> dict:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / ".ai-config").mkdir()
+            (root / ".ai-config" / "registry.yaml").write_bytes(registry_path.read_bytes())
+            saved_root = ai_kit.ROOT
+            ai_kit.ROOT = root
+            try:
+                return ai_kit._load_registry()["owners"]
+            finally:
+                ai_kit.ROOT = saved_root
+
 
 class RegistryEndToEndRoutingTests(EngineTestCase):
     """Runs cmd_route against the REAL registry.yaml and REAL .ai/skills
@@ -954,6 +993,35 @@ class RegistryEndToEndRoutingTests(EngineTestCase):
         skills = self._route("T1")["skills"]
         self.assertTrue(any("ai-cost-management" in s for s in skills), skills)
         self.assertTrue(any("llm-observability" in s for s in skills), skills)
+
+    def test_parallel_handoff_task_routes_to_workflow_orchestration(self) -> None:
+        self.init_workflow()
+        self.add_task("T1", title="Coordinate three parallel workers with a handoff after retry", owner="backend")
+        skills = self._route("T1")["skills"]
+        self.assertTrue(any("workflow-orchestration" in s for s in skills), skills)
+
+    def test_user_journey_task_routes_to_e2e_and_contract_testing(self) -> None:
+        self.init_workflow()
+        self.add_task("T1", title="Verify the checkout user journey across the public API boundary", owner="qa")
+        skills = self._route("T1")["skills"]
+        self.assertTrue(any("e2e-testing" in s for s in skills), skills)
+        self.assertTrue(any("contract-testing" in s for s in skills), skills)
+
+    def test_architecture_tradeoff_task_routes_to_architecture_decisions(self) -> None:
+        self.init_workflow()
+        self.add_task("T1", title="Decide on a cross-cutting architectural trade-off for caching", owner="architect")
+        skills = self._route("T1")["skills"]
+        self.assertTrue(any("architecture-decisions" in s for s in skills), skills)
+
+    def test_ai_owner_roles_get_ai_domain_skills_when_relevant(self) -> None:
+        """Regression: the install-template copy of registry.yaml was missing
+        'ai' from owners.{architect,qa,security,integration,performance},
+        even though the live .ai-config/registry.yaml had it -- a fresh
+        install silently routed less than the repo it was copied from."""
+        self.init_workflow()
+        for role in ("architect", "qa", "security", "integration", "performance"):
+            registry = ai_kit._load_registry()
+            self.assertIn("ai", registry["owners"].get(role, []), f"role '{role}' missing 'ai' in owners")
 
 
 if __name__ == "__main__":

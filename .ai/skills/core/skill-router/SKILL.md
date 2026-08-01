@@ -24,7 +24,10 @@ First, on every task, before loading any other skill or touching code.
    a. Explicit second argument to `skills-for.sh` (highest priority)
    b. `project.stack` from `.ai-config/kit.yaml`
    c. Role's domain list from `owners:` in `registry.yaml`
-4. AI/RAG concerns (`ai_triggers` in `registry.yaml`) route the `ai` domain to `architect`, `backend`, `integration`, `security`, `performance`, and `qa` roles automatically when the stack includes an AI technology.
+4. AI/RAG concerns: `architect`, `backend`, `integration`, `security`, `performance`, and
+   `qa` statically include `ai` in their domain list under `owners:` in `registry.yaml` —
+   this is not stack-conditional. The `ai` domain's technology folders are then filtered
+   by `kit.yaml`'s `project.stack` or the task's tags, same as any other domain.
 5. Typical chains: new/changed API logic → `nodejs-api-core` (+ `api-contract` if a signature changes); UI → `frontend-core`; DB change → `data-migration`; any task → `test-and-validation` then `code-review` at G3; defects → `debugging`; ship → `deployment-infra`; LLM/RAG → `openai` or `rag` skill.
 6. Confirm the gate path: G1 plan → implement → G2 tests → G3 review. Fast-path only if the Sizing Gate allows.
 7. Write the routing note to `.ai-work/session.md`; load each skill body only when its phase is reached (minimal_context).

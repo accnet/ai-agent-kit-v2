@@ -69,6 +69,21 @@ skill_triggers:
     core_skills: ["dependency-management"]
     technology_skills: []
     reason: "New or upgraded dependencies require a dependency-management review pass (AGENTS.md mandatory concerns)."
+  coordination-handoff:
+    match: ["parallel task", "parallel work", "parallel agent", "concurrent task", "concurrent worker", "blocked work", "handoff", "hand-off", "task retry"]
+    core_skills: ["workflow-orchestration"]
+    technology_skills: []
+    reason: "Parallel tasks, blocked work, and handoffs require explicit workflow-orchestration coordination (AGENTS.md mandatory concerns)."
+  user-journey-boundary:
+    match: ["user journey", "end-to-end", "e2e", "public api", "api boundary", "event boundary", "public endpoint"]
+    core_skills: ["e2e-testing", "contract-testing"]
+    technology_skills: []
+    reason: "User journeys and public API/event boundaries require end-to-end and contract test coverage (AGENTS.md mandatory concerns)."
+  architecture-tradeoff:
+    match: ["cross-cutting", "trade-off", "tradeoff", "architectural decision", "durable decision", "design decision"]
+    core_skills: ["architecture-decisions"]
+    technology_skills: []
+    reason: "Cross-cutting or durable trade-offs require an explicit architecture-decisions record (AGENTS.md mandatory concerns). Kept separate from architecture-pipeline below: that one matches the bare word 'architecture', which is not a substring of 'architectural' -- this trigger covers the word forms AGENTS.md's own row actually uses."
   prompt-injection:
     match: ["prompt injection", "jailbreak", "system prompt leak", "tool abuse"]
     core_skills: ["threat-modeling", "security-review"]
@@ -120,17 +135,17 @@ skill_triggers:
 owners:
   planner: []
   researcher: []
-  architect: []
+  architect: [ai]
   backend: [backend, database, ai]
   frontend: [frontend]
   database: [database]
   devops: [devops]
-  qa: [testing]
+  qa: [testing, ai]
   reviewer: []
   document: []
   release: [devops]
-  security: []
-  integration: []
-  performance: []
+  security: [ai]
+  integration: [ai]
+  performance: [ai]
   router: []
   scheduler: []
