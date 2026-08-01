@@ -11,6 +11,9 @@ related: []
 
 # Skill: threat-modeling
 
+> ⚠️ PLACEHOLDER — not yet written for threat-modeling. The procedure, checklist, and anti-patterns below are the generic kit template, not threat-modeling-specific guidance. Replace them with concrete, actionable content before relying on this skill for a real task.
+
+
 ## Purpose
 Identify threats, abuse cases, mitigations, and residual risk for a feature before implementation.
 

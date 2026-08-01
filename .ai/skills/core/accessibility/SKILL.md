@@ -11,6 +11,9 @@ related: []
 
 # Skill: accessibility
 
+> ⚠️ PLACEHOLDER — not yet written for accessibility. The procedure, checklist, and anti-patterns below are the generic kit template, not accessibility-specific guidance. Replace them with concrete, actionable content before relying on this skill for a real task.
+
+
 ## Purpose
 Build and review accessible interfaces with semantic structure, keyboard operation, and assistive technology support.
 

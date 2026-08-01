@@ -11,6 +11,9 @@ related: []
 
 # Skill: documentation-maintenance
 
+> ⚠️ PLACEHOLDER — not yet written for documentation-maintenance. The procedure, checklist, and anti-patterns below are the generic kit template, not documentation-maintenance-specific guidance. Replace them with concrete, actionable content before relying on this skill for a real task.
+
+
 ## Purpose
 Keep user, API, operational, and decision documentation synchronized with delivered behavior.
 

@@ -11,6 +11,9 @@ related: []
 
 # Skill: dependency-management
 
+> ⚠️ PLACEHOLDER — not yet written for dependency-management. The procedure, checklist, and anti-patterns below are the generic kit template, not dependency-management-specific guidance. Replace them with concrete, actionable content before relying on this skill for a real task.
+
+
 ## Purpose
 Change dependencies deliberately with compatibility, security, lockfile, license, and rollback awareness.
 

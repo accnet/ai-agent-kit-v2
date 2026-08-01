@@ -11,6 +11,9 @@ related: []
 
 # Skill: architecture-decisions
 
+> ⚠️ PLACEHOLDER — not yet written for architecture-decisions. The procedure, checklist, and anti-patterns below are the generic kit template, not architecture-decisions-specific guidance. Replace them with concrete, actionable content before relying on this skill for a real task.
+
+
 ## Purpose
 Capture durable architecture decisions with alternatives, consequences, and review points.
 
