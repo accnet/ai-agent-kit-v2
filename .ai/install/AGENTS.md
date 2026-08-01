@@ -172,7 +172,12 @@ schema changes, data fixes, seeds, and backfills.
 - **G3 - Review:** a reviewer records `approve` with no unresolved blockers
   before delivery.
 - **G4 - Hygiene:** never commit secrets, credentials, or transient
-  `.ai-work/` state. Keep changes traceable to a task.
+  `.ai-work/` state. Keep changes traceable to a task. `.ai-config/*.yaml`
+  (`runners.yaml`'s runner commands; `kit.yaml`'s `test_command`,
+  `lint_command`, `typecheck_command`, `build_command`) are executed as
+  shell strings by the engine (`dispatch`, `verify`) — treat write access to
+  these files as equivalent to arbitrary shell execution, and review changes
+  to them with the same scrutiny as code, not as passive configuration.
 - **G5 - Destructive operations:** require explicit user approval for the
   specific operation, including destructive data changes, force pushes, and
   production deployment.

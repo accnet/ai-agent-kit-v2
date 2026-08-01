@@ -1662,6 +1662,10 @@ def cmd_dispatch(args: argparse.Namespace) -> dict:
     # place quoting happens, so a template can never double-quote it.
     cmd = _render_runner_command(template, prompt, selected_model)
     print(f"Dispatching task {task['id']} to runner '{runner_label}'...", file=sys.stderr)
+    # shell=True is required: `template` is a shell command string from
+    # .ai-config/runners.yaml, not an argv list, so it can't be handed to
+    # subprocess without a shell (see G4 in AGENTS.md: write access to
+    # runners.yaml is equivalent to arbitrary shell execution here).
     result = _sp.run(cmd, shell=True, cwd=str(ROOT), stdin=_sp.DEVNULL)
     # Audit log
     audit = {
@@ -1772,6 +1776,11 @@ def cmd_verify(args: argparse.Namespace) -> dict:
                     continue
                 executed_quality_checks += 1
                 print(f"  Running {key}: {cmd}", file=sys.stderr)
+                # shell=True is required: `cmd` is a shell command string
+                # from .ai-config/kit.yaml (test_command/lint_command/...),
+                # not an argv list -- same G4 threat model as dispatch's
+                # runner command above: treat write access to kit.yaml as
+                # equivalent to arbitrary shell execution.
                 result = _sp.run(cmd, shell=True, cwd=str(ROOT), capture_output=True, text=True)
                 check = {"name": key, "command": cmd, "exit_code": result.returncode, "status": "pass" if result.returncode == 0 else "fail"}
                 if result.returncode != 0:
