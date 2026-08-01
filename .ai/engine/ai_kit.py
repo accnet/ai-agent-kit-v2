@@ -578,7 +578,121 @@ def new_state(title: str, workflow: str) -> dict:
 def configured_stack() -> set[str]:
     manifest = _config_path("kit.yaml")
     match = re.search(r"^\s*stack:\s*\[([^]]*)\]", manifest.read_text(encoding="utf-8"), re.MULTILINE)
-    return {item.strip() for item in match.group(1).split(",") if item.strip()} if match else set()
+    return {item.strip().lower() for item in match.group(1).split(",") if item.strip()} if match else set()
+
+
+def _parse_inline_list(value: object) -> list[str]:
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
+    if value is None:
+        return []
+    text = str(value).strip()
+    if text.startswith("[") and text.endswith("]"):
+        try:
+            parsed = json.loads(text)
+            if isinstance(parsed, list):
+                return [str(item).strip() for item in parsed if str(item).strip()]
+        except json.JSONDecodeError:
+            inner = text[1:-1]
+            return [item.strip().strip("\"'") for item in inner.split(",") if item.strip()]
+    return [text] if text else []
+
+
+def _load_skill_metadata(skill_dir: Path) -> dict:
+    defaults = {
+        "name": skill_dir.name,
+        "domain": skill_dir.parent.name,
+        "version": "0.0.0",
+        "status": "active",
+        "owner": "unknown",
+        "reviewed_at": "",
+        "reviewers": [],
+        "depends_on": [],
+        "triggers": [],
+        "documents": ["overview.md", "patterns.md", "best-practices.md", "pitfalls.md", "examples.md"],
+        "deprecated": False,
+        "entrypoint": (skill_dir / "overview.md").relative_to(ROOT).as_posix(),
+        "path": skill_dir.relative_to(ROOT).as_posix(),
+    }
+    meta_path = skill_dir / "skill.meta.yaml"
+    if not meta_path.exists():
+        return defaults
+    fields: dict[str, object] = {}
+    for raw_line in meta_path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or ":" not in line:
+            continue
+        key, value = line.split(":", 1)
+        fields[key.strip()] = value.strip()
+    metadata = dict(defaults)
+    metadata["name"] = str(fields.get("name") or metadata["name"]).strip()
+    metadata["domain"] = str(fields.get("domain") or metadata["domain"]).strip()
+    metadata["version"] = str(fields.get("version") or metadata["version"]).strip()
+    metadata["status"] = str(fields.get("status") or metadata["status"]).strip()
+    metadata["owner"] = str(fields.get("owner") or metadata["owner"]).strip()
+    metadata["reviewed_at"] = str(fields.get("reviewed_at") or metadata["reviewed_at"]).strip()
+    metadata["reviewers"] = _parse_inline_list(fields.get("reviewers"))
+    metadata["depends_on"] = _parse_inline_list(fields.get("depends_on"))
+    metadata["triggers"] = [item.lower() for item in _parse_inline_list(fields.get("triggers"))]
+    metadata["documents"] = _parse_inline_list(fields.get("documents")) or defaults["documents"]
+    metadata["deprecated"] = str(fields.get("deprecated", "false")).lower() == "true"
+    metadata["entrypoint"] = str(fields.get("entrypoint") or metadata["entrypoint"]).strip()
+    metadata["path"] = str(fields.get("path") or metadata["path"]).strip()
+    return metadata
+
+
+def _load_skill_triggers() -> dict[str, dict]:
+    triggers = _load_yaml_registry(".ai-config/registry.yaml", "skill_triggers")
+    normalized: dict[str, dict] = {}
+    for trigger_id, payload in triggers.items():
+        normalized[trigger_id] = {
+            "id": trigger_id,
+            "match": [item.lower() for item in _parse_inline_list(payload.get("match"))],
+            "core_skills": _parse_inline_list(payload.get("core_skills")),
+            "technology_skills": _parse_inline_list(payload.get("technology_skills")),
+            "reason": str(payload.get("reason") or "").strip(),
+        }
+    return normalized
+
+
+def _task_text(task: dict) -> str:
+    parts = [task.get("title") or ""]
+    parts.extend(task.get("tags") or [])
+    parts.extend(task.get("files") or [])
+    parts.extend(task.get("acceptance") or [])
+    return " ".join(str(part) for part in parts).lower()
+
+
+def _tokenize_task(task: dict) -> set[str]:
+    tokens: set[str] = set(configured_stack())
+    tokens.update(str(tag).lower() for tag in (task.get("tags") or []))
+    for value in [task.get("title") or "", " ".join(task.get("files") or [])]:
+        for token in re.findall(r"[a-z0-9][a-z0-9_-]{1,}", value.lower()):
+            tokens.add(token)
+    return tokens
+
+
+def _resolve_technology_skill(root: Path, ref: str) -> Path | None:
+    candidate = root / ref
+    if candidate.exists():
+        return candidate
+    if "/" in ref:
+        candidate = root / ".ai" / "skills" / ref
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def _technology_skill_doc_paths(skill_dir: Path, metadata: dict) -> list[str]:
+    docs = metadata.get("documents") or []
+    if not docs:
+        docs = ["overview.md", "patterns.md", "best-practices.md", "pitfalls.md", "examples.md"]
+    resolved: list[str] = []
+    for doc in docs:
+        doc_path = skill_dir / doc
+        if doc_path.exists():
+            resolved.append(doc_path.relative_to(ROOT).as_posix())
+    return resolved
 
 
 def load(path: Path) -> dict:
@@ -1064,17 +1178,151 @@ def cmd_route(args: argparse.Namespace) -> dict:
     registry = _load_registry()
     domains = registry["owners"].get(role, ROLE_DOMAINS.get(role, []))
     skill_root = ROOT / ".ai" / "skills"
-    skills = []
-    stack = configured_stack() | set(task.get("tags", []))
+    tokens = _tokenize_task(task)
+    task_text = _task_text(task)
+    trigger_registry = _load_skill_triggers()
+
+    selected_tech: dict[str, dict] = {}
+    selected_core: dict[str, dict] = {}
+    trigger_matches: list[dict] = []
+
+    def add_core(name: str, reason: str, phase: str) -> None:
+        path = skill_root / "core" / name / "SKILL.md"
+        if not path.exists():
+            return
+        key = path.relative_to(ROOT).as_posix()
+        current = selected_core.get(key)
+        if not current:
+            selected_core[key] = {
+                "name": name,
+                "path": (skill_root / "core" / name).relative_to(ROOT).as_posix(),
+                "entrypoint": key,
+                "documents": [key],
+                "selection_reasons": [reason],
+                "loading_phase": phase,
+                "type": "core",
+            }
+            return
+        if reason not in current["selection_reasons"]:
+            current["selection_reasons"].append(reason)
+        if current["loading_phase"].startswith("role") and phase.startswith("trigger"):
+            current["loading_phase"] = phase
+
+    def add_technology(skill_dir: Path, reason: str, phase: str) -> None:
+        metadata = _load_skill_metadata(skill_dir)
+        entrypoint = metadata.get("entrypoint") or (skill_dir / "overview.md").relative_to(ROOT).as_posix()
+        key = str(entrypoint)
+        docs = _technology_skill_doc_paths(skill_dir, metadata)
+        current = selected_tech.get(key)
+        if not current:
+            selected_tech[key] = {
+                "name": f"{skill_dir.parent.name}/{skill_dir.name}",
+                "path": metadata.get("path") or skill_dir.relative_to(ROOT).as_posix(),
+                "entrypoint": key,
+                "documents": docs,
+                "selection_reasons": [reason],
+                "loading_phase": phase,
+                "type": "technology",
+                "metadata": metadata,
+            }
+            return
+        if reason not in current["selection_reasons"]:
+            current["selection_reasons"].append(reason)
+        for doc in docs:
+            if doc not in current["documents"]:
+                current["documents"].append(doc)
+        if current["loading_phase"].startswith("role") and phase.startswith("trigger"):
+            current["loading_phase"] = phase
+
+    # Base role core skills.
+    for name in CORE_BY_ROLE.get(role, ["skill-router"]):
+        add_core(name, f"role:{role}", "role-core")
+
+    # Base technology from role-owned domains, filtered by stack/tags and metadata triggers.
+    domain_candidates: list[Path] = []
     for domain in domains:
         folder = skill_root / domain
-        if folder.exists():
-            for path in sorted(folder.glob("*/overview.md")):
-                if not stack or path.parent.name in stack or domain in stack:
-                    skills.append(path.relative_to(ROOT).as_posix())
-    skills.extend((skill_root / "core" / name / "SKILL.md").relative_to(ROOT).as_posix() for name in CORE_BY_ROLE.get(role, ["skill-router"]) if (skill_root / "core" / name / "SKILL.md").exists())
+        if not folder.exists():
+            continue
+        domain_candidates.extend(sorted(path for path in folder.iterdir() if path.is_dir()))
+
+    for skill_dir in domain_candidates:
+        skill_name = skill_dir.name.lower()
+        domain_name = skill_dir.parent.name.lower()
+        should_include = (
+            skill_name in tokens
+            or domain_name in tokens
+        )
+        if should_include:
+            add_technology(skill_dir, f"role-domain:{domain_name}", "role-technology")
+
+    # Trigger-driven concerns from registry.
+    for trigger_id, trigger in trigger_registry.items():
+        terms = trigger.get("match") or []
+        hits = [term for term in terms if term and term in task_text]
+        if not hits:
+            continue
+        reason = trigger.get("reason") or f"trigger:{trigger_id}"
+        trigger_matches.append({"id": trigger_id, "matches": hits, "reason": reason})
+        for core_skill in trigger.get("core_skills") or []:
+            add_core(core_skill, reason, "trigger-core")
+        for tech_ref in trigger.get("technology_skills") or []:
+            # llm-model trigger dynamically chooses openai vs general application skill.
+            if trigger_id == "llm-model" and tech_ref == "ai/openai":
+                if not {"openai", "gpt"} & tokens and "openai" not in task_text and "gpt" not in task_text:
+                    continue
+            if trigger_id == "llm-model" and tech_ref == "ai/llm-application":
+                if {"openai", "gpt"} & tokens or "openai" in task_text or "gpt" in task_text:
+                    continue
+            resolved = _resolve_technology_skill(ROOT, tech_ref)
+            if resolved:
+                add_technology(resolved, reason, "trigger-technology")
+
+    # RAG trigger-specific database skill selection.
+    rag_selected = any(item["id"] == "rag-retrieval" for item in trigger_matches)
+    if rag_selected and ("pgvector" in tokens or "postgresql" in tokens):
+        resolved = _resolve_technology_skill(ROOT, "database/pgvector")
+        if resolved:
+            add_technology(resolved, "RAG stack indicates pgvector backend", "trigger-database")
+    if rag_selected and "qdrant" in tokens:
+        resolved = _resolve_technology_skill(ROOT, "database/qdrant")
+        if resolved:
+            add_technology(resolved, "RAG stack indicates qdrant backend", "trigger-database")
+
+    phase_order = {"role-core": 1, "role-technology": 2, "trigger-core": 3, "trigger-technology": 4, "trigger-database": 5}
+    all_details = list(selected_core.values()) + list(selected_tech.values())
+    all_details.sort(key=lambda item: (phase_order.get(item["loading_phase"], 9), item["entrypoint"]))
+    for idx, item in enumerate(all_details, start=1):
+        item["loading_order"] = idx
+
+    skills = [item["entrypoint"] for item in all_details]
     root = workspace(state_path(args.state))
-    return {"task": task["id"], "owner": role, "tags": task["tags"], "role_contract": (Path(".ai") / "agents" / role).as_posix(), "skills": skills, "context": [display_path(root / "plan" / "plan.md"), display_path(root / "tasks" / "tasks.md"), ".ai/engine/state-schema.md"] + task["files"]}
+    response = {
+        "task": task["id"],
+        "owner": role,
+        "tags": task["tags"],
+        "role_contract": (Path(".ai") / "agents" / role).as_posix(),
+        "skills": skills,
+        "context": [display_path(root / "plan" / "plan.md"), display_path(root / "tasks" / "tasks.md"), ".ai/engine/state-schema.md"] + task["files"],
+        "skill_details": all_details,
+        "trigger_matches": trigger_matches,
+        "loading_instructions": [
+            "Read each selected entrypoint first: technology skills start with overview.md, core skills start with SKILL.md.",
+            "Then load phase-specific documents in order: patterns.md -> best-practices.md -> pitfalls.md -> examples.md when needed for the assigned phase.",
+            "Load only the selected skills listed in this route output; do not pull unrelated domains."
+        ],
+    }
+    if getattr(args, "explain", False):
+        response["explain"] = {
+            "role_domains": domains,
+            "task_tokens": sorted(tokens),
+            "phase_order": phase_order,
+            "selection_summary": {
+                "core_count": len(selected_core),
+                "technology_count": len(selected_tech),
+            },
+        }
+    return response
 
 
 def cmd_context_add(args: argparse.Namespace) -> dict:
@@ -1721,6 +1969,7 @@ def cmd_pipeline(args: argparse.Namespace) -> dict:
 
 def _write_task_handoff(
     task: dict,
+    route_payload: dict,
     state_arg: str | None,
     runner_name: str,
     runner: dict,
@@ -1753,6 +2002,11 @@ def _write_task_handoff(
             "runner": runner_name, "provider": runner.get("provider") or None,
             "model": model, "agent_id": agent_id,
         },
+        "routing": {
+            "skills": route_payload.get("skills", []),
+            "skill_details": route_payload.get("skill_details", []),
+            "loading_instructions": route_payload.get("loading_instructions", []),
+        },
         "instructions": instructions,
     }
     handoff_path = workspace(state_path(state_arg)) / "handoffs" / f"{task['id']}.json"
@@ -1780,8 +2034,9 @@ def cmd_dispatch(args: argparse.Namespace) -> dict:
     state_flag = f" --state {args.state}" if args.state else ""
     runner_label = f"{runner_name}/{selected_model}" if selected_model else runner_name
     handoff_path = None
+    route_payload = cmd_route(argparse.Namespace(state=args.state, id=task["id"], explain=False))
     if runner.get("input") == "json-file":
-        handoff_path = _write_task_handoff(task, args.state, runner_name, runner, selected_model, getattr(args, "agent_id", None))
+        handoff_path = _write_task_handoff(task, route_payload, args.state, runner_name, runner, selected_model, getattr(args, "agent_id", None))
         handoff_display = display_path(handoff_path)
         prompt = f"You are {task['owner']}. Read and execute the task JSON at {handoff_display}. Do not violate AGENTS.md. When done, run: bash .ai/scripts/ai-kit{state_flag} transition {task['id']} complete --actor {task['owner']} --detail 'Completed by {runner_label}'"
     else:
@@ -1810,7 +2065,7 @@ def cmd_dispatch(args: argparse.Namespace) -> dict:
     audit_path.write_text(json.dumps(audit, indent=2) + "\n", encoding="utf-8")
     if result.returncode != 0:
         raise EngineError(f"Runner {runner_name} exited with code {result.returncode}")
-    return {"task": task["id"], "runner": runner_name, "status": "dispatched"}
+    return {"task": task["id"], "runner": runner_name, "status": "dispatched", "skills": route_payload.get("skills", [])}
 
 
 def cmd_dispatch_ready(args: argparse.Namespace) -> dict:
@@ -1960,7 +2215,7 @@ def parser() -> argparse.ArgumentParser:
     dispatch = sub.add_parser("dispatch"); dispatch.add_argument("id"); dispatch.add_argument("--runner"); dispatch.add_argument("--model"); dispatch.add_argument("--agent-id"); dispatch.set_defaults(fn=cmd_dispatch)
     dispatch_ready = sub.add_parser("dispatch-ready"); dispatch_ready.add_argument("--runner"); dispatch_ready.add_argument("--model"); dispatch_ready.add_argument("--limit", type=int); dispatch_ready.add_argument("--context"); dispatch_ready.add_argument("--epic"); dispatch_ready.add_argument("--agent-id"); dispatch_ready.set_defaults(fn=cmd_dispatch_ready)
     pipeline = sub.add_parser("pipeline"); pipeline.add_argument("id"); pipeline.add_argument("--agent-id"); pipeline.set_defaults(fn=cmd_pipeline)
-    route = sub.add_parser("route"); route.add_argument("id"); route.set_defaults(fn=cmd_route)
+    route = sub.add_parser("route"); route.add_argument("id"); route.add_argument("--explain", action="store_true"); route.set_defaults(fn=cmd_route)
     status = sub.add_parser("status"); status.add_argument("--context"); status.add_argument("--epic"); status.set_defaults(fn=cmd_status)
     timeline = sub.add_parser("timeline"); timeline.set_defaults(fn=cmd_timeline)
     blocked = sub.add_parser("blocked"); blocked.set_defaults(fn=cmd_blocked)

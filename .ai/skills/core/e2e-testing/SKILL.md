@@ -11,27 +11,30 @@ related: []
 
 # Skill: e2e-testing
 
-> ⚠️ PLACEHOLDER — not yet written for e2e-testing. The procedure, checklist, and anti-patterns below are the generic kit template, not e2e-testing-specific guidance. Replace them with concrete, actionable content before relying on this skill for a real task.
-
-
 ## Purpose
-Verify critical user journeys across real boundaries with deterministic environments and fixtures.
+Validate full user or system journeys across real boundaries before marking work complete.
 
 ## When to use
-Use when a task matches this domain, before the owning agent claims completion.
+Changes cross API/UI/provider boundaries, affect critical paths, or alter workflow orchestration.
 
 ## Procedure
-Choose high-value journeys from acceptance criteria, establish deterministic data, assert visible outcomes and error paths, and preserve failure artifacts.
+1. Define the smallest high-value end-to-end scenarios impacted by the change.
+2. Prepare deterministic test data and environment setup/teardown.
+3. Execute journey tests through public interfaces, not internal helpers.
+4. Assert user-visible/system-visible outcomes and critical side effects.
+5. Capture artifacts for failures (logs/traces/screenshots) and link to evidence.
 
 ## Checklist
-- [ ] Critical journey is covered
-- [ ] Fixtures are isolated
-- [ ] Failure artifact is retained
-- [ ] Adjacent regression is checked
+- [ ] Scenario covers changed boundary behavior end-to-end.
+- [ ] Test data is deterministic and isolated.
+- [ ] Assertions verify outcome and side effects.
+- [ ] Failure artifacts are retained for debugging.
+- [ ] E2E checks are scoped to avoid duplicating all unit tests.
 
 ## Anti-patterns
-- Marking work complete from intuition instead of recorded evidence.
-- Expanding scope without a planned task and owner.
+- Relying only on unit tests for boundary-crossing changes.
+- Flaky E2E tests using sleeps instead of explicit conditions.
+- Skipping cleanup, causing cross-test interference.
 
 ## Output
-Record the decision, evidence paths, and residual risk in the workflow state and the appropriate .ai-work report.
+E2E evidence demonstrating impacted journeys still work.

@@ -25,6 +25,65 @@ stack_skills:
   react-vite: {path: .ai/skills/frontend/react-vite, stack: [react, vite]}
   vitest-testing: {path: .ai/skills/testing/vitest-testing, stack: [vitest]}
   docker-compose-local: {path: .ai/skills/devops/docker-compose-local, stack: [docker, compose]}
+  backend-python: {path: .ai/skills/backend/python, stack: [python]}
+  backend-fastapi: {path: .ai/skills/backend/fastapi, stack: [python, fastapi]}
+  frontend-typescript: {path: .ai/skills/frontend/typescript, stack: [typescript]}
+  frontend-nextjs: {path: .ai/skills/frontend/nextjs, stack: [nextjs, react]}
+  frontend-tailwind: {path: .ai/skills/frontend/tailwind, stack: [tailwind]}
+  testing-pytest: {path: .ai/skills/testing/pytest, stack: [pytest, python]}
+  testing-playwright: {path: .ai/skills/testing/playwright, stack: [playwright]}
+  database-pgvector: {path: .ai/skills/database/pgvector, stack: [postgresql, pgvector, rag]}
+  database-qdrant: {path: .ai/skills/database/qdrant, stack: [qdrant, rag]}
+  devops-terraform: {path: .ai/skills/devops/terraform, stack: [terraform]}
+  devops-prometheus: {path: .ai/skills/devops/prometheus, stack: [prometheus, observability]}
+  devops-grafana: {path: .ai/skills/devops/grafana, stack: [grafana, observability]}
+  ai-llm-application: {path: .ai/skills/ai/llm-application, stack: [llm, ai]}
+  ai-prompt-engineering: {path: .ai/skills/ai/prompt-engineering, stack: [llm, prompts, ai]}
+  ai-ai-safety: {path: .ai/skills/ai/ai-safety, stack: [llm, safety, ai]}
+  ai-model-evaluation: {path: .ai/skills/ai/model-evaluation, stack: [evaluation, llm, ai]}
+  ai-llm-observability: {path: .ai/skills/ai/llm-observability, stack: [observability, llm, ai]}
+  ai-agent-orchestration: {path: .ai/skills/ai/agent-orchestration, stack: [agents, orchestration, ai]}
+  ai-embeddings: {path: .ai/skills/ai/embeddings, stack: [embeddings, rag, ai]}
+  ai-vector-search: {path: .ai/skills/ai/vector-search, stack: [vector, retrieval, rag, ai]}
+  ai-ai-data-governance: {path: .ai/skills/ai/ai-data-governance, stack: [governance, privacy, ai]}
+  ai-ai-cost-management: {path: .ai/skills/ai/ai-cost-management, stack: [cost, llm, ai]}
+
+skill_triggers:
+  prompt-injection:
+    match: ["prompt injection", "jailbreak", "system prompt leak", "tool abuse"]
+    core_skills: ["threat-modeling", "security-review"]
+    technology_skills: ["ai/ai-safety"]
+    reason: "Untrusted prompt content or instruction override risk requires AI safety and threat controls."
+  latency-cost-token:
+    match: ["latency", "slow response", "p95", "token", "cost", "spend", "throughput"]
+    core_skills: ["performance-profiling", "observability"]
+    technology_skills: ["ai/llm-observability", "ai/ai-cost-management"]
+    reason: "Performance/cost keywords require measurable budgets and AI telemetry."
+  evaluation:
+    match: ["evaluation", "benchmark", "quality score", "regression set", "hallucination rate"]
+    core_skills: ["test-and-validation", "e2e-testing"]
+    technology_skills: ["ai/model-evaluation"]
+    reason: "Evaluation changes require reproducible quality and end-to-end validation evidence."
+  external-provider-api:
+    match: ["external provider", "third-party api", "webhook", "callback", "event consumer", "provider sdk"]
+    core_skills: ["integration-contracts", "contract-testing", "webhooks-and-retries"]
+    technology_skills: ["ai/llm-application"]
+    reason: "Provider and callback boundaries require contract safety and retry discipline."
+  architecture-pipeline:
+    match: ["architecture", "pipeline", "orchestration", "multi-agent", "state machine"]
+    core_skills: ["architecture-decisions"]
+    technology_skills: ["ai/agent-orchestration"]
+    reason: "Cross-cutting pipeline changes require explicit architecture decisions."
+  rag-retrieval:
+    match: ["rag", "retrieval", "vector search", "semantic search", "embeddings"]
+    core_skills: []
+    technology_skills: ["ai/rag", "ai/embeddings", "ai/vector-search", "ai/model-evaluation"]
+    reason: "Retrieval workloads require RAG pipeline, embedding, and retrieval quality controls."
+  llm-model:
+    match: ["llm", "model", "gpt", "openai", "inference", "completion", "prompt"]
+    core_skills: ["threat-modeling", "performance-profiling", "observability"]
+    technology_skills: ["ai/openai", "ai/llm-application"]
+    reason: "Model integration requires provider handling plus security and performance guardrails."
 
 owners:
   planner: []

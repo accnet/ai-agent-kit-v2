@@ -1,5 +1,13 @@
-# openai Application Notes
+# OpenAI Examples
 
-> ⚠️ PLACEHOLDER — not yet written for openai. This file still holds the generic kit template below, with no openai-specific guidance. Do not treat it as real domain knowledge; replace it with actual openai patterns/pitfalls/examples before relying on it.
+## Request checklist example
+1. Identify existing OpenAI adapter module and config source.
+2. Add/extend one typed method (input schema, model selection, timeout, retries).
+3. Parse and validate output into domain DTO.
+4. Emit metrics: request_count, latency_ms, input_tokens, output_tokens, error_type.
+5. Add unit tests for success + provider failure + malformed output.
 
-Before implementation, identify one nearby project example with the same responsibility. Mirror its structure, naming, error policy, and test style. Record deviations and their rationale in the task review.
+## Review evidence
+- Changed adapter path(s)
+- Tests proving output validation and retry behavior
+- Log/trace snippet showing redaction and token accounting

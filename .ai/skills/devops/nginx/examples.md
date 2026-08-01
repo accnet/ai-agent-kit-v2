@@ -1,5 +1,4 @@
-# nginx Application Notes
+# NGINX Examples
 
-> ⚠️ PLACEHOLDER — not yet written for nginx. This file still holds the generic kit template below, with no nginx-specific guidance. Do not treat it as real domain knowledge; replace it with actual nginx patterns/pitfalls/examples before relying on it.
-
-Before implementation, identify one nearby project example with the same responsibility. Mirror its structure, naming, error policy, and test style. Record deviations and their rationale in the task review.
+- New upstream route with dedicated timeout/rate-limit profile.
+- Validation evidence: `nginx -t`, reload output, and smoke check of route + headers.

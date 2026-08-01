@@ -11,27 +11,30 @@ related: []
 
 # Skill: webhooks-and-retries
 
-> ⚠️ PLACEHOLDER — not yet written for webhooks-and-retries. The procedure, checklist, and anti-patterns below are the generic kit template, not webhooks-and-retries-specific guidance. Replace them with concrete, actionable content before relying on this skill for a real task.
-
-
 ## Purpose
-Implement signed, idempotent webhooks and retry-safe external side effects.
+Implement webhook/event processing that is authentic, idempotent, and retry-safe.
 
 ## When to use
-Use when a task matches this domain, before the owning agent claims completion.
+Inbound webhooks, event consumers, async callbacks, or retrying external side effects.
 
 ## Procedure
-Verify signatures before parsing business data. Persist idempotency keys, classify retryable failures, use bounded backoff, and expose dead-letter or recovery handling.
+1. Validate webhook authenticity (signature, timestamp, source constraints).
+2. Design idempotency key strategy and deduplication storage semantics.
+3. Implement retry policy with bounded attempts and backoff/jitter.
+4. Handle out-of-order or duplicate deliveries safely.
+5. Expose observability for delivery status, retry counts, and dead-letter outcomes.
 
 ## Checklist
-- [ ] Signature verification is tested
-- [ ] Duplicate delivery is harmless
-- [ ] Retries are bounded
-- [ ] Recovery path is documented
+- [ ] Signature/auth checks are enforced and tested.
+- [ ] Idempotency prevents duplicate side effects.
+- [ ] Retry policy is bounded and documented.
+- [ ] Poison/failing events have dead-letter handling.
+- [ ] Operational metrics/alerts exist for failure spikes.
 
 ## Anti-patterns
-- Marking work complete from intuition instead of recorded evidence.
-- Expanding scope without a planned task and owner.
+- Processing webhook payloads without signature verification.
+- Non-idempotent handlers retried blindly.
+- Infinite retries with no dead-letter path.
 
 ## Output
-Record the decision, evidence paths, and residual risk in the workflow state and the appropriate .ai-work report.
+Reliable webhook/event handler with idempotency and retry evidence.

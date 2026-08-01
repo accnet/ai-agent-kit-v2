@@ -1,5 +1,17 @@
-# openai Patterns
+# OpenAI Patterns
 
-> ⚠️ PLACEHOLDER — not yet written for openai. This file still holds the generic kit template below, with no openai-specific guidance. Do not treat it as real domain knowledge; replace it with actual openai patterns/pitfalls/examples before relying on it.
+## Adapter boundary
+- Keep one provider client module responsible for auth, retries, timeouts, and model mapping.
+- Pass typed request objects from application code; return typed response objects.
 
-Keep boundaries explicit, use project-native configuration and error handling, and isolate external effects behind tested interfaces. Prefer small composable units over framework-wide changes for a scoped task.
+## Structured outputs
+- Prefer schema-constrained outputs (JSON schema / strict parsing) for automation paths.
+- Validate model output before persistence or side effects.
+
+## Tool calling
+- Whitelist callable tools and enforce argument validation.
+- Record tool-call id and completion outcome for auditability.
+
+## Resilience
+- Use bounded retries with jitter for rate limits/transient network failures.
+- Use idempotency keys for operations that can be replayed.
