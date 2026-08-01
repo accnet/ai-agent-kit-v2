@@ -818,5 +818,143 @@ class SkillContentTests(unittest.TestCase):
         self.assertEqual(flagged, [], f"Placeholder content found in: {flagged}")
 
 
+class RealRegistryTriggerTests(unittest.TestCase):
+    """Exercises the REAL .ai-config/registry.yaml and its install-template
+    copy, not a synthetic fixture -- because the bug this guards against
+    lives in the YAML content itself. _load_yaml_registry() is a simple
+    line-based parser: a `match`/`core_skills`/`technology_skills` array
+    split across multiple physical lines is silently mis-parsed into a
+    single unmatchable string, with no error. A synthetic single-line
+    fixture (see RoutingAndSkillMetadataTests) would never catch that
+    regression, since nothing forces it to stay in sync with how someone
+    actually edits the real file.
+    """
+
+    REGISTRY_FILES = (
+        REPO_ROOT / ".ai-config" / "registry.yaml",
+        REPO_ROOT / ".ai" / "install" / "config" / "registry.yaml",
+    )
+
+    # AGENTS.md's mandatory-concerns table, plus the split-out AI-cost
+    # trigger: each entry is (trigger id, a phrase it must match, a core
+    # skill it must pull in).
+    EXPECTED_TRIGGERS = [
+        ("auth-security", "oauth", "security-review"),
+        ("auth-security", "credential", "threat-modeling"),
+        ("ui-interaction", "button", "accessibility"),
+        ("ui-interaction", "accessibility", "frontend-core"),
+        ("dependency-change", "upgrade", "dependency-management"),
+        ("performance-latency", "latency", "performance-profiling"),
+        ("performance-latency", "throughput", "observability"),
+        ("ai-cost-token", "token budget", "performance-profiling"),
+        ("ai-cost-token", "llm cost", "observability"),
+    ]
+
+    def _load_triggers_from(self, registry_path: Path) -> dict:
+        """Parse skill_triggers from an arbitrary registry.yaml using the
+        engine's own real parser, by staging it where _config_path expects
+        the active project's config (so this exercises the exact code path
+        `route` uses in production, not a reimplementation of it)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / ".ai-config").mkdir()
+            (root / ".ai-config" / "registry.yaml").write_bytes(registry_path.read_bytes())
+            saved_root = ai_kit.ROOT
+            ai_kit.ROOT = root
+            try:
+                return ai_kit._load_skill_triggers()
+            finally:
+                ai_kit.ROOT = saved_root
+
+    def test_expected_triggers_present_with_working_match_terms(self) -> None:
+        for registry_path in self.REGISTRY_FILES:
+            triggers = self._load_triggers_from(registry_path)
+            for trigger_id, phrase, core_skill in self.EXPECTED_TRIGGERS:
+                with self.subTest(registry=registry_path.relative_to(REPO_ROOT), trigger=trigger_id, phrase=phrase):
+                    self.assertIn(trigger_id, triggers, f"trigger '{trigger_id}' missing from {registry_path}")
+                    trigger = triggers[trigger_id]
+                    self.assertIn(
+                        phrase, trigger["match"],
+                        f"'{phrase}' not in {trigger_id}.match -- if this trigger's YAML array was "
+                        f"line-wrapped, the parser silently drops everything after the first line",
+                    )
+                    self.assertIn(core_skill, trigger["core_skills"])
+
+    def test_auth_trigger_does_not_pull_in_ai_cost_skills(self) -> None:
+        """Regression: a single "latency-cost-token" trigger used to match
+        bare "token", so an OAuth task mentioning "token refresh" pulled in
+        ai/ai-cost-management purely by accident."""
+        for registry_path in self.REGISTRY_FILES:
+            triggers = self._load_triggers_from(registry_path)
+            auth_matches = triggers["auth-security"]["match"]
+            for term in auth_matches:
+                for ai_trigger_id in ("ai-cost-token",):
+                    ai_terms = triggers[ai_trigger_id]["match"]
+                    self.assertFalse(
+                        any(term in ai_term or ai_term in term for ai_term in ai_terms),
+                        f"auth-security match term '{term}' overlaps with {ai_trigger_id} "
+                        f"match terms {ai_terms} in {registry_path}",
+                    )
+
+    def test_performance_latency_trigger_has_no_ai_technology_skills(self) -> None:
+        """The generic Performance row in AGENTS.md's mandatory-concerns
+        table does not require AI skills; only ai-cost-token (LLM-specific
+        token/cost phrasing) should pull those in."""
+        for registry_path in self.REGISTRY_FILES:
+            triggers = self._load_triggers_from(registry_path)
+            self.assertEqual(triggers["performance-latency"]["technology_skills"], [])
+            self.assertTrue(triggers["ai-cost-token"]["technology_skills"])
+
+
+class RegistryEndToEndRoutingTests(EngineTestCase):
+    """Runs cmd_route against the REAL registry.yaml and REAL .ai/skills
+    tree (only the workflow state file is isolated), so these assert what
+    an actual `ai-kit route` invocation would return -- not what a
+    synthetic fixture says it should."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        # Point role/skill/config lookups at the real repo; only the
+        # workflow state itself stays in the isolated temp dir.
+        ai_kit.ROOT = REPO_ROOT
+
+    def _route(self, task_id: str) -> dict:
+        return ai_kit.cmd_route(ns(state=str(self.state_file), id=task_id))
+
+    def test_auth_task_routes_to_security(self) -> None:
+        self.init_workflow()
+        self.add_task("T1", title="Add OAuth login endpoint with token refresh", owner="backend")
+        skills = self._route("T1")["skills"]
+        self.assertTrue(any("security-review" in s for s in skills), skills)
+        self.assertTrue(any("threat-modeling" in s for s in skills), skills)
+        self.assertFalse(any("/ai/" in s for s in skills), f"unexpected AI skills: {skills}")
+
+    def test_ui_task_routes_to_accessibility(self) -> None:
+        self.init_workflow()
+        self.add_task("T1", title="Redesign checkout button and modal interaction", owner="frontend")
+        skills = self._route("T1")["skills"]
+        self.assertTrue(any("accessibility" in s for s in skills), skills)
+
+    def test_dependency_task_routes_to_dependency_management(self) -> None:
+        self.init_workflow()
+        self.add_task("T1", title="Bump lodash and axios to latest versions", owner="devops")
+        skills = self._route("T1")["skills"]
+        self.assertTrue(any("dependency-management" in s for s in skills), skills)
+
+    def test_generic_latency_task_does_not_pull_ai_skills(self) -> None:
+        self.init_workflow()
+        self.add_task("T1", title="Optimize slow dashboard query p95 latency", owner="backend")
+        skills = self._route("T1")["skills"]
+        self.assertTrue(any("performance-profiling" in s for s in skills), skills)
+        self.assertFalse(any("/ai/" in s for s in skills), f"unexpected AI skills: {skills}")
+
+    def test_llm_cost_task_still_pulls_ai_skills(self) -> None:
+        self.init_workflow()
+        self.add_task("T1", title="Reduce LLM token budget and inference cost per request", owner="backend")
+        skills = self._route("T1")["skills"]
+        self.assertTrue(any("ai-cost-management" in s for s in skills), skills)
+        self.assertTrue(any("llm-observability" in s for s in skills), skills)
+
+
 if __name__ == "__main__":
     unittest.main()
