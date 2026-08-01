@@ -1,9 +1,8 @@
-# openai Best Practices
+# OpenAI Best Practices
 
-> ⚠️ PLACEHOLDER — not yet written for openai. This file still holds the generic kit template below, with no openai-specific guidance. Do not treat it as real domain knowledge; replace it with actual openai patterns/pitfalls/examples before relying on it.
-
-- Follow pinned project versions and existing conventions.
-- Validate untrusted input at boundaries.
-- Keep secrets in environment-backed configuration, never source files.
-- Add focused tests for changed behavior.
-- Make operational impact observable where applicable.
+- Verify the SDK and API mode already used in this repo before adding new endpoints.
+- Pin model identifiers in config, not scattered literals.
+- Separate user-visible errors from internal diagnostics; never expose raw provider traces.
+- Track token usage and latency per operation and include correlation ids.
+- Redact secrets and PII from prompts, logs, traces, and persisted transcripts.
+- Add tests for: schema validation, retry branch, timeout branch, and provider error mapping.

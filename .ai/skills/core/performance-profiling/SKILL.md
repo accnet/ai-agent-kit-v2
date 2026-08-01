@@ -11,27 +11,30 @@ related: []
 
 # Skill: performance-profiling
 
-> ⚠️ PLACEHOLDER — not yet written for performance-profiling. The procedure, checklist, and anti-patterns below are the generic kit template, not performance-profiling-specific guidance. Replace them with concrete, actionable content before relying on this skill for a real task.
-
-
 ## Purpose
-Measure and improve latency, throughput, memory, and query behavior without speculative optimization.
+Make performance changes from measured baselines and explicit budgets, not intuition.
 
 ## When to use
-Use when a task matches this domain, before the owning agent claims completion.
+Tasks involve latency, throughput, memory, token usage, query volume, or cost-sensitive paths.
 
 ## Procedure
-Capture a baseline, isolate the bottleneck with profiler or traces, set a measurable budget, change one cause, and compare the same workload after the change.
+1. Define performance objective and baseline measurement (p50/p95 latency, CPU, memory, token/cost).
+2. Profile the hot path to identify dominant contributors.
+3. Apply the smallest change addressing the measured bottleneck.
+4. Re-measure with same workload; compare against baseline and acceptance target.
+5. Record trade-offs (quality/cost/complexity) and monitoring implications.
 
 ## Checklist
-- [ ] Baseline and workload are recorded
-- [ ] Bottleneck evidence exists
-- [ ] Budget is measurable
-- [ ] Regression check passes
+- [ ] Baseline and post-change metrics are captured.
+- [ ] Bottleneck evidence points to changed code path.
+- [ ] No correctness/security regressions introduced.
+- [ ] Monitoring/alerting reflects new budget assumptions.
+- [ ] Results are reproducible with documented command/workload.
 
 ## Anti-patterns
-- Marking work complete from intuition instead of recorded evidence.
-- Expanding scope without a planned task and owner.
+- Optimizing code paths without profiling evidence.
+- Reporting only average latency while p95/p99 regresses.
+- Trading correctness for speed without explicit approval.
 
 ## Output
-Record the decision, evidence paths, and residual risk in the workflow state and the appropriate .ai-work report.
+Before/after performance evidence with reproducible methodology.

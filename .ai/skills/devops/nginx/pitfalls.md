@@ -1,5 +1,6 @@
-# nginx Pitfalls
+# NGINX Pitfalls
 
-> ⚠️ PLACEHOLDER — not yet written for nginx. This file still holds the generic kit template below, with no nginx-specific guidance. Do not treat it as real domain knowledge; replace it with actual nginx patterns/pitfalls/examples before relying on it.
-
-Avoid introducing a parallel architecture, bypassing validation, silently swallowing errors, broad dependency upgrades, or copying snippets that conflict with the current project version.
+- Overlapping location rules causing unintended route precedence.
+- Proxy buffering/timeouts mismatched with upstream behavior.
+- TLS ciphers/protocols regressing baseline security policy.
+- Caching personalized responses by mistake.

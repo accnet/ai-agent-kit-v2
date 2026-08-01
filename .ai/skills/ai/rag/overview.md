@@ -1,5 +1,5 @@
-# rag Overview
+# RAG Overview
 
-> ⚠️ PLACEHOLDER — not yet written for rag. This file still holds the generic kit template below, with no rag-specific guidance. Do not treat it as real domain knowledge; replace it with actual rag patterns/pitfalls/examples before relying on it.
+Use this skill for retrieval-augmented generation pipelines: ingestion, chunking, embeddings, indexing, retrieval, reranking, and grounded answer synthesis.
 
-Use this reference when a task explicitly involves rag in the ai domain. First inspect the project's existing rag usage and versions; this kit supplies guardrails, not a replacement architecture.
+Always inspect existing data contracts and index lifecycle code before changes. Keep retrieval deterministic and auditable: what was retrieved, why it matched, and how it influenced the final answer.

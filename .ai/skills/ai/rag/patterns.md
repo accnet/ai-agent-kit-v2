@@ -1,5 +1,14 @@
-# rag Patterns
+# RAG Patterns
 
-> ⚠️ PLACEHOLDER — not yet written for rag. This file still holds the generic kit template below, with no rag-specific guidance. Do not treat it as real domain knowledge; replace it with actual rag patterns/pitfalls/examples before relying on it.
+## Ingestion pipeline
+- Normalize source docs, deduplicate, and attach stable document/chunk ids.
+- Store provenance metadata (source, version, timestamp, ACL scope).
 
-Keep boundaries explicit, use project-native configuration and error handling, and isolate external effects behind tested interfaces. Prefer small composable units over framework-wide changes for a scoped task.
+## Retrieval pipeline
+- Apply permission filters before semantic search.
+- Use top-k retrieval plus optional lexical/hybrid reranking.
+- Return citation payloads (doc_id, chunk_id, score, snippet).
+
+## Freshness lifecycle
+- Re-index on source updates, and tombstone deleted documents.
+- Keep embedding model/version in index metadata.

@@ -1,5 +1,7 @@
-# rag Pitfalls
+# RAG Pitfalls
 
-> ⚠️ PLACEHOLDER — not yet written for rag. This file still holds the generic kit template below, with no rag-specific guidance. Do not treat it as real domain knowledge; replace it with actual rag patterns/pitfalls/examples before relying on it.
-
-Avoid introducing a parallel architecture, bypassing validation, silently swallowing errors, broad dependency upgrades, or copying snippets that conflict with the current project version.
+- Reusing embeddings after changing tokenizer/model without re-indexing.
+- Missing deletion workflow, leaving stale/forbidden chunks searchable.
+- Skipping citations, making hallucinations impossible to audit.
+- Letting retrieval bypass authorization filters.
+- Prompt-injection instructions in retrieved chunks overriding system policy.

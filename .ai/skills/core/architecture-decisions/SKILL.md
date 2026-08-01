@@ -11,27 +11,30 @@ related: []
 
 # Skill: architecture-decisions
 
-> ⚠️ PLACEHOLDER — not yet written for architecture-decisions. The procedure, checklist, and anti-patterns below are the generic kit template, not architecture-decisions-specific guidance. Replace them with concrete, actionable content before relying on this skill for a real task.
-
-
 ## Purpose
-Capture durable architecture decisions with alternatives, consequences, and review points.
+Capture cross-cutting design choices with explicit trade-offs, constraints, and rollback implications.
 
 ## When to use
-Use when a task matches this domain, before the owning agent claims completion.
+Any decision affecting module boundaries, ownership, lifecycle state, contracts, scalability, or long-term maintenance.
 
 ## Procedure
-State the decision context, constraints, alternatives, chosen option, consequences, migration or rollback, and the date for reconsideration.
+1. State the decision question, scope, and constraints (security, latency, operability, compatibility).
+2. List viable alternatives and why each was rejected for this context.
+3. Describe selected architecture and its expected impacts on code, tests, rollout, and operations.
+4. Record migration/backward-compatibility and rollback strategy.
+5. Link the decision to concrete acceptance criteria and verification evidence.
 
 ## Checklist
-- [ ] Decision has alternatives
-- [ ] Consequences are explicit
-- [ ] Rollback or migration is known
-- [ ] Decision is linked to tasks
+- [ ] Decision includes explicit alternatives and rationale.
+- [ ] Impacts to APIs/data contracts are identified.
+- [ ] Operational implications (observability, deployment, rollback) are documented.
+- [ ] Risks and open questions are tracked with owners.
+- [ ] Decision is referenced in task plan/evidence artifacts.
 
 ## Anti-patterns
-- Marking work complete from intuition instead of recorded evidence.
-- Expanding scope without a planned task and owner.
+- Landing cross-cutting changes without documenting trade-offs.
+- Using "future work" as a substitute for rollback planning.
+- Treating implementation detail notes as architecture decisions.
 
 ## Output
-Record the decision, evidence paths, and residual risk in the workflow state and the appropriate .ai-work report.
+Architecture note/ADR-quality decision summary linked to tasks and evidence.

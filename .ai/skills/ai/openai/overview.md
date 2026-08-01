@@ -1,5 +1,7 @@
-# openai Overview
+# OpenAI Overview
 
-> ⚠️ PLACEHOLDER — not yet written for openai. This file still holds the generic kit template below, with no openai-specific guidance. Do not treat it as real domain knowledge; replace it with actual openai patterns/pitfalls/examples before relying on it.
+Use this skill when a task integrates OpenAI APIs (Responses, Chat Completions, embeddings, image/audio generation, or tool calling).
 
-Use this reference when a task explicitly involves openai in the ai domain. First inspect the project's existing openai usage and versions; this kit supplies guardrails, not a replacement architecture.
+Before editing code, inspect the project adapter and pinned SDK/model versions first. Keep provider calls isolated behind the existing adapter boundary and avoid leaking provider-specific payload shapes into business logic.
+
+For every change, define: expected inputs, structured output schema, timeout/retry policy, logging redaction, and fallback behavior when OpenAI is unavailable.

@@ -1,5 +1,6 @@
-# mysql Pitfalls
+# MySQL Pitfalls
 
-> ⚠️ PLACEHOLDER — not yet written for mysql. This file still holds the generic kit template below, with no mysql-specific guidance. Do not treat it as real domain knowledge; replace it with actual mysql patterns/pitfalls/examples before relying on it.
-
-Avoid introducing a parallel architecture, bypassing validation, silently swallowing errors, broad dependency upgrades, or copying snippets that conflict with the current project version.
+- Directly adding NOT NULL columns with no default on populated tables.
+- Assuming optimizer picks intended index without validation.
+- Using implicit type coercion in predicates, causing index misses.
+- Missing rollback notes for irreversible migrations.

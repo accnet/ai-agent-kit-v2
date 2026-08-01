@@ -1,5 +1,5 @@
-# nuxt Application Notes
+# Nuxt Examples
 
-> ⚠️ PLACEHOLDER — not yet written for nuxt. This file still holds the generic kit template below, with no nuxt-specific guidance. Do not treat it as real domain knowledge; replace it with actual nuxt patterns/pitfalls/examples before relying on it.
-
-Before implementation, identify one nearby project example with the same responsibility. Mirror its structure, naming, error policy, and test style. Record deviations and their rationale in the task review.
+- Add a page that loads data server-side with explicit error fallback.
+- Extract shared request logic into composable + typed response mapping.
+- Evidence: route test/smoke run and hydration warning-free output.

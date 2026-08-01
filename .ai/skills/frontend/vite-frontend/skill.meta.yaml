@@ -1,0 +1,13 @@
+name: vite-frontend
+domain: frontend
+version: 1.0.0
+status: active
+owner: frontend
+reviewed_at: 2026-08-01
+reviewers: [reviewer, frontend]
+depends_on: []
+triggers: []
+documents: [overview.md, patterns.md, best-practices.md, pitfalls.md, examples.md]
+deprecated: false
+entrypoint: .ai/skills/frontend/vite-frontend/overview.md
+path: .ai/skills/frontend/vite-frontend

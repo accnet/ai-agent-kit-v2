@@ -1,5 +1,7 @@
-# openai Pitfalls
+# OpenAI Pitfalls
 
-> ⚠️ PLACEHOLDER — not yet written for openai. This file still holds the generic kit template below, with no openai-specific guidance. Do not treat it as real domain knowledge; replace it with actual openai patterns/pitfalls/examples before relying on it.
-
-Avoid introducing a parallel architecture, bypassing validation, silently swallowing errors, broad dependency upgrades, or copying snippets that conflict with the current project version.
+- Sending unbounded prompts or tool results (token spikes and latency blowups).
+- Trusting model JSON without schema validation.
+- Logging full prompts/responses containing credentials or customer data.
+- Mixing business logic with provider payload wiring, making provider replacement hard.
+- Silent retry loops without caps, causing duplicate writes and cost surprises.

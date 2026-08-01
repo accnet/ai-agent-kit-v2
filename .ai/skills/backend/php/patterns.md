@@ -1,5 +1,6 @@
-# php Patterns
+# PHP Patterns
 
-> ⚠️ PLACEHOLDER — not yet written for php. This file still holds the generic kit template below, with no php-specific guidance. Do not treat it as real domain knowledge; replace it with actual php patterns/pitfalls/examples before relying on it.
-
-Keep boundaries explicit, use project-native configuration and error handling, and isolate external effects behind tested interfaces. Prefer small composable units over framework-wide changes for a scoped task.
+- Keep controllers/thin entrypoints; move business rules into services.
+- Use typed DTOs/value objects for cross-layer boundaries.
+- Isolate infrastructure clients (DB/queue/http) behind interfaces.
+- Prefer explicit transaction boundaries for multi-write workflows.

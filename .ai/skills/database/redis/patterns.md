@@ -1,5 +1,6 @@
-# redis Patterns
+# Redis Patterns
 
-> ⚠️ PLACEHOLDER — not yet written for redis. This file still holds the generic kit template below, with no redis-specific guidance. Do not treat it as real domain knowledge; replace it with actual redis patterns/pitfalls/examples before relying on it.
-
-Keep boundaries explicit, use project-native configuration and error handling, and isolate external effects behind tested interfaces. Prefer small composable units over framework-wide changes for a scoped task.
+- Namespace keys by domain and tenant/environment.
+- Use TTLs deliberately and document cache invalidation triggers.
+- Use atomic primitives (SET NX/XX, Lua, transactions) for contention-sensitive flows.
+- Keep serialization format/version explicit for backward compatibility.

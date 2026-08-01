@@ -1,5 +1,12 @@
-# rag Application Notes
+# RAG Examples
 
-> ⚠️ PLACEHOLDER — not yet written for rag. This file still holds the generic kit template below, with no rag-specific guidance. Do not treat it as real domain knowledge; replace it with actual rag patterns/pitfalls/examples before relying on it.
+## Minimal production change
+1. Update ingestion mapping with stable ids + metadata.
+2. Rebuild affected index partition with explicit embedding version.
+3. Add retrieval response fields: citations, scores, and filter summary.
+4. Add evaluation case proving relevant chunk retrieval and faithful answer.
 
-Before implementation, identify one nearby project example with the same responsibility. Mirror its structure, naming, error policy, and test style. Record deviations and their rationale in the task review.
+## Evidence to attach
+- Index migration/backfill notes
+- Retrieval/evaluation test output (recall@k or pass/fail fixture)
+- Security check for ACL filtering and prompt-injection handling
