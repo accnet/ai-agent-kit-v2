@@ -11,27 +11,30 @@ related: []
 
 # Skill: contract-testing
 
-> ⚠️ PLACEHOLDER — not yet written for contract-testing. The procedure, checklist, and anti-patterns below are the generic kit template, not contract-testing-specific guidance. Replace them with concrete, actionable content before relying on this skill for a real task.
-
-
 ## Purpose
-Verify producer-consumer compatibility for public APIs, events, and schemas.
+Prevent interface regressions by validating provider-consumer contracts at stable boundaries.
 
 ## When to use
-Use when a task matches this domain, before the owning agent claims completion.
+Changes to HTTP APIs, events, webhooks, serialized payloads, SDK adapters, or schema-enforced interfaces.
 
 ## Procedure
-Define examples at the boundary, validate both success and error responses, run compatibility checks before release, and version breaking changes deliberately.
+1. Identify contract producer, consumers, and backward-compatibility expectations.
+2. Codify required fields, optional fields, and semantic invariants as tests/fixtures.
+3. Add negative tests for missing fields, type drift, and unknown enum/state values.
+4. Run producer and consumer-side tests (or mocks) against shared fixture/contracts.
+5. Document migration plan when breaking changes are unavoidable.
 
 ## Checklist
-- [ ] Success and error schemas are tested
-- [ ] Consumer assumptions are represented
-- [ ] Breaking changes are versioned
-- [ ] Compatibility result is recorded
+- [ ] Contract fixture/schema updated with version notes.
+- [ ] Positive and negative cases exist for changed fields.
+- [ ] Consumer compatibility verified for current supported versions.
+- [ ] Breaking change path includes explicit migration guidance.
+- [ ] Evidence includes contract test command and outputs.
 
 ## Anti-patterns
-- Marking work complete from intuition instead of recorded evidence.
-- Expanding scope without a planned task and owner.
+- Only testing happy-path payloads.
+- Changing contract shape without consumer proof.
+- Using snapshot-only assertions with no semantic checks.
 
 ## Output
-Record the decision, evidence paths, and residual risk in the workflow state and the appropriate .ai-work report.
+Updated contract tests/fixtures with compatibility evidence.

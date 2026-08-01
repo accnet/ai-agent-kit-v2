@@ -1,3 +1,10 @@
 # Nuxt Pitfalls
 
+<<<<<<< HEAD
 Do not access `window` or `document` at module level — they are undefined during SSR; guard with `if (process.client)` or `onMounted`. Do not store sensitive values in `publicRuntimeConfig` / `runtimeConfig.public` — they are exposed to the browser. Do not mutate `useRoute()` state directly; use `navigateTo()` for navigation. Avoid blocking `useAsyncData` with heavyweight server calls on every request for pages that could use SSG or ISR. Do not register plugins that have side effects on both client and server without a guard (`process.server` / `process.client`).
+=======
+- Hydration mismatch from non-deterministic server/client rendering.
+- Mixing server secrets into client bundle code paths.
+- Large global plugins that inflate every page payload.
+- Ignoring route-level loading/error handling.
+>>>>>>> origin/main

@@ -1,3 +1,10 @@
 # MySQL Pitfalls
 
+<<<<<<< HEAD
 Do not use `SELECT *` in application queries; name columns explicitly. Do not run DDL inside a transaction that also performs DML — MySQL auto-commits DDL. Do not use `ENUM` for values that may change; use a lookup table instead. Avoid `DATETIME` with implicit time zones; use `DATETIME` + explicit UTC application convention or `TIMESTAMP` with awareness of the 2038 limit. Do not create full-table scans on million-row tables; add composite indexes and profile with slow-query log. Do not disable foreign key checks permanently (`SET FOREIGN_KEY_CHECKS=0`) outside controlled migration windows.
+=======
+- Directly adding NOT NULL columns with no default on populated tables.
+- Assuming optimizer picks intended index without validation.
+- Using implicit type coercion in predicates, causing index misses.
+- Missing rollback notes for irreversible migrations.
+>>>>>>> origin/main

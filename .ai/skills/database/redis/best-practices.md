@@ -1,3 +1,10 @@
 # Redis Best Practices
 
+<<<<<<< HEAD
 Configure `maxmemory` and a suitable eviction policy (`allkeys-lru` for pure cache, `volatile-lru` if some keys must survive eviction). Enable persistence (RDB snapshots + AOF) for session and queue data; disable persistence for pure ephemeral caches to maximise throughput. Use Redis Sentinel or Redis Cluster for high availability in production. Authenticate with `requirepass` / ACL users and restrict bind addresses. Monitor memory usage, hit/miss ratio, and eviction events. Instrument client-side with a metrics library (Prometheus redis_exporter or equivalent). Use pipelining for batched reads; avoid N+1 round trips.
+=======
+- Define cache hit/miss metrics and latency budgets.
+- Protect against cache stampede with request coalescing or soft TTLs.
+- Bound payload sizes and avoid storing oversized blobs.
+- Add integration tests for expiration and invalidation behavior.
+>>>>>>> origin/main

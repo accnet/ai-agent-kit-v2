@@ -11,27 +11,30 @@ related: []
 
 # Skill: accessibility
 
-> ⚠️ PLACEHOLDER — not yet written for accessibility. The procedure, checklist, and anti-patterns below are the generic kit template, not accessibility-specific guidance. Replace them with concrete, actionable content before relying on this skill for a real task.
-
-
 ## Purpose
-Build and review accessible interfaces with semantic structure, keyboard operation, and assistive technology support.
+Ship accessible UI changes with keyboard, screen-reader, and error-feedback behavior verified as evidence.
 
 ## When to use
-Use when a task matches this domain, before the owning agent claims completion.
+Any UI, form, navigation, modal, or interaction change that users can see or operate.
 
 ## Procedure
-Use semantic elements first, provide labels and focus order, support keyboard interaction, expose validation errors, and test the changed journey without a pointer device.
+1. Identify changed user journeys and interactive elements; list required keyboard and screen-reader outcomes.
+2. Apply semantic HTML first; add ARIA only where native semantics are insufficient.
+3. Ensure focus order, focus visibility, and focus return for dialogs/menus/dynamic panels.
+4. Expose input errors with programmatic association (`aria-describedby`, live regions) and actionable text.
+5. Verify manually using keyboard-only flow and at least one screen reader smoke pass for changed paths.
 
 ## Checklist
-- [ ] Keyboard journey works
-- [ ] Names and labels are present
-- [ ] Focus is visible and managed
-- [ ] Error state is announced
+- [ ] All changed controls have accessible names and states.
+- [ ] Keyboard-only journey works end-to-end (including escape/close actions).
+- [ ] Focus is visible and returns predictably after transient UI closes.
+- [ ] Error and status announcements are perceivable to assistive technology.
+- [ ] Color contrast and non-color affordances are preserved for changed UI.
 
 ## Anti-patterns
-- Marking work complete from intuition instead of recorded evidence.
-- Expanding scope without a planned task and owner.
+- Adding ARIA roles that conflict with native semantics.
+- Relying on pointer-only interactions with no keyboard equivalent.
+- Treating visual pass as accessibility pass without assistive-tech evidence.
 
 ## Output
-Record the decision, evidence paths, and residual risk in the workflow state and the appropriate .ai-work report.
+Changed UI + accessibility verification notes (keyboard and assistive-tech evidence paths).

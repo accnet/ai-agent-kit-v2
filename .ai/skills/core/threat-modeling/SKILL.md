@@ -11,27 +11,30 @@ related: []
 
 # Skill: threat-modeling
 
-> ⚠️ PLACEHOLDER — not yet written for threat-modeling. The procedure, checklist, and anti-patterns below are the generic kit template, not threat-modeling-specific guidance. Replace them with concrete, actionable content before relying on this skill for a real task.
-
-
 ## Purpose
-Identify threats, abuse cases, mitigations, and residual risk for a feature before implementation.
+Identify and mitigate exploitable threats across trust boundaries before shipping changes.
 
 ## When to use
-Use when a task matches this domain, before the owning agent claims completion.
+Untrusted input, auth/permissions, sensitive data, external integrations, AI prompts/tools, or privileged actions are involved.
 
 ## Procedure
-Identify assets, actors, trust boundaries, and abuse paths. Rank threats by likelihood and impact, assign mitigations, and turn unresolved risks into tasks.
+1. Map assets, entry points, trust boundaries, and attacker capabilities.
+2. Enumerate abuse cases (spoofing, tampering, data exfiltration, privilege escalation, denial of service).
+3. Prioritize threats by impact and exploitability; choose concrete mitigations.
+4. Add validation, authorization, rate limiting, and audit controls where needed.
+5. Verify mitigations with targeted security tests or adversarial fixtures.
 
 ## Checklist
-- [ ] Assets and boundaries are listed
-- [ ] Abuse cases have mitigations
-- [ ] High-risk paths have acceptance criteria
-- [ ] Residual risk has an owner
+- [ ] Threat list includes changed boundary surfaces.
+- [ ] High-risk threats have implemented mitigations.
+- [ ] Mitigations are testable and tested.
+- [ ] Sensitive data handling and logging redaction are verified.
+- [ ] Residual risks are recorded with owner and follow-up.
 
 ## Anti-patterns
-- Marking work complete from intuition instead of recorded evidence.
-- Expanding scope without a planned task and owner.
+- Assuming internal callers are always trusted.
+- Relying on prompts/policies instead of enforcement for security controls.
+- Leaving high-severity threats as undocumented TODOs.
 
 ## Output
-Record the decision, evidence paths, and residual risk in the workflow state and the appropriate .ai-work report.
+Threat model summary + implemented controls + residual risk log.

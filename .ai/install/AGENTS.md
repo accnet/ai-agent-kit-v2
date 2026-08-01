@@ -119,10 +119,13 @@ Before a component is marked implemented, provide:
 ## Skill And Concern Routing
 
 Use `route T<n>` as the authoritative runtime assignment. It returns the role
-contract, core skill entry points, stack-relevant technology knowledge, and
-minimal context. `skills-for.sh <role>` is the equivalent discovery command
-before a task exists. Read the returned `SKILL.md` or `overview.md`; do not
-load unrelated skill directories speculatively.
+contract, core skill entry points, stack-relevant technology knowledge,
+structured skill metadata (entrypoint + document list + selection reasons +
+loading phase/order), and minimal context. `route T<n> --explain` adds trigger
+match evidence and token-level selection diagnostics. `skills-for.sh <role>` is
+the equivalent discovery command before a task exists. Read the returned
+`SKILL.md` or `overview.md`; do not load unrelated skill directories
+speculatively.
 
 These concerns are mandatory when their trigger is present:
 
@@ -138,6 +141,18 @@ These concerns are mandatory when their trigger is present:
 | UI interaction | Frontend: `accessibility`, `frontend-core` |
 | New or upgraded dependency | DevOps: `dependency-management` |
 | User, API, operational, or decision documentation | Document: `documentation-maintenance` |
+
+AI trigger routing (registry-backed) is mandatory when matched by task content:
+
+| Trigger | Required additions |
+| --- | --- |
+| Prompt injection / jailbreak / instruction override | Core `threat-modeling`, `security-review`; AI `ai-safety` |
+| Latency / cost / token pressure | Core `performance-profiling`, `observability`; AI `llm-observability`, `ai-cost-management` |
+| Evaluation / benchmark / quality regression | Core `test-and-validation`, `e2e-testing`; AI `model-evaluation` |
+| External provider/API/webhook boundary | Core `integration-contracts`, `contract-testing`, `webhooks-and-retries`; AI `llm-application` |
+| Architecture / pipeline orchestration | Core `architecture-decisions`; AI `agent-orchestration` |
+| RAG / retrieval / embeddings | AI `rag`, `embeddings`, `vector-search`, `model-evaluation`; add `database/pgvector` or `database/qdrant` when stack/tags indicate it |
+| LLM/model integration | AI `openai` or `llm-application` (as applicable), plus security/performance core concerns |
 
 ## Planning And Execution
 

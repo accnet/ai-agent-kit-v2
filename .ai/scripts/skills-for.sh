@@ -11,7 +11,18 @@ domains="$(awk -v role="$role" '
   $1 == role ":" {gsub(/.*\[/, ""); gsub(/\].*/, ""); gsub(/,/, " "); print; found=1}
   END {if (!found) print "any"}
 ' .ai-config/registry.yaml)"
-[[ -n "$override" ]] && domains="${override//,/ }"
+if [[ -n "$override" ]]; then
+  domains="${override//,/ }"
+else
+  stack="$(awk '
+    /^\s*stack:\s*\[/ {
+      line=$0
+      gsub(/.*\[/, "", line); gsub(/\].*/, "", line); gsub(/,/, " ", line)
+      print line; found=1
+    }
+    END {if (!found) print ""}
+  ' .ai-config/kit.yaml)"
+fi
 
 for domain in $domains; do
   if [[ "$domain" == "any" ]]; then
@@ -20,7 +31,21 @@ for domain in $domains; do
     find ".ai/skills/$domain" -mindepth 1 -maxdepth 1 -type d | sort
   fi
 done | awk '!seen[$0]++' | while IFS= read -r folder; do
-  printf '%s\n' "$folder/overview.md"
+  entrypoint="$folder/overview.md"
+  if [[ -f "$folder/skill.meta.yaml" ]]; then
+    configured_entrypoint="$(awk -F': ' '/^entrypoint:/ {print $2}' "$folder/skill.meta.yaml" | head -n1)"
+    if [[ -n "$configured_entrypoint" && -f "$configured_entrypoint" ]]; then
+      entrypoint="$configured_entrypoint"
+    fi
+  fi
+  if [[ -n "${stack:-}" ]]; then
+    name="$(basename "$folder")"
+    domain="$(basename "$(dirname "$folder")")"
+    if ! grep -Eiq "(^|[[:space:]])$name([[:space:]]|$)|(^|[[:space:]])$domain([[:space:]]|$)" <<< "$stack"; then
+      continue
+    fi
+  fi
+  printf '%s\n' "$entrypoint"
 done
 
 case "$role" in
@@ -29,7 +54,7 @@ case "$role" in
   backend) core="api-contract observability" ;;
   frontend) core="frontend-core test-and-validation" ;;
   database) core="data-migration api-contract" ;;
-  devops|release) core="deployment-infra observability" ;;
+  devops) core="deployment-infra observability" ;;
   qa) core="test-and-validation debugging" ;;
   reviewer) core="code-review api-contract" ;;
   security) core="security-review threat-modeling" ;;

@@ -11,27 +11,30 @@ related: []
 
 # Skill: release-management
 
-> ⚠️ PLACEHOLDER — not yet written for release-management. The procedure, checklist, and anti-patterns below are the generic kit template, not release-management-specific guidance. Replace them with concrete, actionable content before relying on this skill for a real task.
-
-
 ## Purpose
-Prepare a verifiable release with compatibility, rollout, rollback, and communication checks.
+Prepare and ship changes with explicit readiness checks, rollout plan, and rollback strategy.
 
 ## When to use
-Use when a task matches this domain, before the owning agent claims completion.
+Tasks touch CI, packaging, deployment, migrations, runtime configuration, or release communication.
 
 ## Procedure
-Confirm all gates, version and changelog, deployment order, migration safety, monitoring, rollback trigger, and explicit production approval.
+1. Confirm release scope, dependencies, and risk classification.
+2. Verify required checks pass (tests, gates, security, compatibility).
+3. Define rollout strategy (phased/canary/full) and observability checkpoints.
+4. Prepare rollback steps and data migration safety notes.
+5. Publish release notes including behavior changes and operational actions.
 
 ## Checklist
-- [ ] Release notes are complete
-- [ ] Rollback is actionable
-- [ ] Verification is green
-- [ ] Production approval is recorded
+- [ ] All release gates and required checks are green.
+- [ ] Rollout and rollback instructions are concrete.
+- [ ] Operational owners and monitoring windows are identified.
+- [ ] Breaking changes and migration steps are communicated.
+- [ ] Post-release validation steps are listed.
 
 ## Anti-patterns
-- Marking work complete from intuition instead of recorded evidence.
-- Expanding scope without a planned task and owner.
+- Declaring release-ready without evidence paths.
+- Shipping migrations with no rollback/backout story.
+- Treating CI green as the only release criterion.
 
 ## Output
-Record the decision, evidence paths, and residual risk in the workflow state and the appropriate .ai-work report.
+Release readiness record with rollout/rollback and post-release checks.

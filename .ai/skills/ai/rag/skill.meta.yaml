@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 skill_name: Retrieval-Augmented Generation
 domain: ai
 technology: rag
@@ -5,3 +6,18 @@ owner: backend
 version: "1.0"
 reviewed_at: "2026-08-01"
 supported_stack: [rag, retrieval, embeddings, vector, llm, ai]
+=======
+name: rag
+domain: ai
+version: 1.0.0
+status: active
+owner: backend
+reviewed_at: 2026-08-01
+reviewers: [reviewer, backend]
+depends_on: []
+triggers: [rag, retrieval]
+documents: [overview.md, patterns.md, best-practices.md, pitfalls.md, examples.md]
+deprecated: false
+entrypoint: .ai/skills/ai/rag/overview.md
+path: .ai/skills/ai/rag
+>>>>>>> origin/main

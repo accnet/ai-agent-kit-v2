@@ -1,3 +1,10 @@
 # MySQL Best Practices
 
+<<<<<<< HEAD
 Always use parameterised queries; never interpolate user input into SQL. Run `EXPLAIN` on new queries before merging and verify the access type is `ref` or better for indexed lookups. Set `sql_mode` to `STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION`. Configure `innodb_buffer_pool_size` to ~70 % of available RAM for dedicated database hosts. Enable binary logging for point-in-time recovery. Take regular full backups (mysqldump or Percona XtraBackup) and verify restore works. Never store plain-text passwords; hash with bcrypt or Argon2 at the application layer.
+=======
+- Run migrations with lock-awareness on large tables.
+- Backfill in batches to avoid long-running locks.
+- Keep charset/collation consistent with existing schema defaults.
+- Add tests for schema contract and query behavior changes.
+>>>>>>> origin/main

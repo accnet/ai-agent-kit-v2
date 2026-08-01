@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 skill_name: Nuxt
 domain: frontend
 technology: nuxt
@@ -5,3 +6,18 @@ owner: frontend
 version: "1.0"
 reviewed_at: "2026-08-01"
 supported_stack: [nuxt, vue, ssr, ssg]
+=======
+name: nuxt
+domain: frontend
+version: 1.0.0
+status: active
+owner: frontend
+reviewed_at: 2026-08-01
+reviewers: [reviewer, frontend]
+depends_on: []
+triggers: []
+documents: [overview.md, patterns.md, best-practices.md, pitfalls.md, examples.md]
+deprecated: false
+entrypoint: .ai/skills/frontend/nuxt/overview.md
+path: .ai/skills/frontend/nuxt
+>>>>>>> origin/main

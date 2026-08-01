@@ -5,6 +5,7 @@ contract, scoped technology knowledge, imported core skills, and minimal task
 context paths. Assignment follows the task owner set by Planner; Router does
 not silently reassign work.
 
+<<<<<<< HEAD
 ## Basic Usage
 
 ```bash
@@ -81,3 +82,16 @@ Every technology skill directory under `.ai/skills/<domain>/<technology>/`
 includes a `skill.meta.yaml` sidecar file. See `.ai/skills/SKILL-METADATA.md`
 for the full contract. The router uses the `supported_stack` field to
 supplement stack-based filtering.
+=======
+Route output includes:
+
+- `skills` (backward-compatible list of selected entrypoints)
+- `skill_details` (name/path/entrypoint/documents/selection reasons/loading
+  phase/loading order/type)
+- `trigger_matches` (registry trigger hits and rationale)
+- `loading_instructions` (progressive loading contract)
+
+Use `python .ai/engine/ai_kit.py route T<n> --explain` for token-level and
+phase-level selection diagnostics. Trigger rules are configured in
+`.ai-config/registry.yaml` under `skill_triggers`.
+>>>>>>> origin/main

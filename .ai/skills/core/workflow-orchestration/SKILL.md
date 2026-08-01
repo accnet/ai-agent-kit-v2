@@ -11,27 +11,30 @@ related: []
 
 # Skill: workflow-orchestration
 
-> ⚠️ PLACEHOLDER — not yet written for workflow-orchestration. The procedure, checklist, and anti-patterns below are the generic kit template, not workflow-orchestration-specific guidance. Replace them with concrete, actionable content before relying on this skill for a real task.
-
-
 ## Purpose
-Operate multi-agent tasks through ownership, DAG dependencies, evidence, retries, and recovery.
+Coordinate multi-task execution with deterministic dependency handling, ownership, and lifecycle integrity.
 
 ## When to use
-Use when a task matches this domain, before the owning agent claims completion.
+Tasks involve parallel work, blocked dependencies, handoffs, retries, or multi-agent sequencing.
 
 ## Procedure
-Validate task ownership and dependencies, route minimal context, record claims and evidence, block with a reason, and retry only after the cause is known.
+1. Validate dependency graph as acyclic and ownership-defined.
+2. Claim runnable work through legal state transitions only.
+3. Record handoff payloads, attempt counts, and blocking reasons.
+4. Apply retry/resume logic without bypassing QA/review gates.
+5. Keep audit trail explaining routing and transition decisions.
 
 ## Checklist
-- [ ] DAG is valid
-- [ ] Ownership is unambiguous
-- [ ] Transition evidence is recorded
-- [ ] Blocked work has a recovery action
+- [ ] Dependencies and phase order are explicit and valid.
+- [ ] No worker bypasses state manager transitions.
+- [ ] Blocked tasks include actionable unblock reason.
+- [ ] Handoff data contains required context and acceptance criteria.
+- [ ] Audit history explains why and when each transition happened.
 
 ## Anti-patterns
-- Marking work complete from intuition instead of recorded evidence.
-- Expanding scope without a planned task and owner.
+- Directly mutating task status outside transition APIs.
+- Dispatching tasks with ambiguous ownership or missing acceptance criteria.
+- Conflating execution completion with QA/review approval.
 
 ## Output
-Record the decision, evidence paths, and residual risk in the workflow state and the appropriate .ai-work report.
+Deterministic orchestration evidence: valid DAG, traceable handoffs, and lawful transitions.

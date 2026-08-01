@@ -11,27 +11,30 @@ related: []
 
 # Skill: integration-contracts
 
-> ⚠️ PLACEHOLDER — not yet written for integration-contracts. The procedure, checklist, and anti-patterns below are the generic kit template, not integration-contracts-specific guidance. Replace them with concrete, actionable content before relying on this skill for a real task.
-
-
 ## Purpose
-Design reliable contracts with external services, APIs, events, and asynchronous consumers.
+Keep external API/provider integrations robust, version-aware, and contract-verified.
 
 ## When to use
-Use when a task matches this domain, before the owning agent claims completion.
+Any outbound API call, webhook consumer, event ingestion, or third-party SDK behavior change.
 
 ## Procedure
-Define request and response schema, ownership, timeouts, error taxonomy, compatibility, and observability. Verify provider failures and consumer compatibility.
+1. Identify external contract version and current adapter implementation.
+2. Define request/response/error schema expectations and timeout/retry behavior.
+3. Validate signatures/authentication and idempotency requirements where applicable.
+4. Add or update contract tests/mocks for success and failure classes.
+5. Document operational runbook updates (rate limits, fallback, degraded mode).
 
 ## Checklist
-- [ ] Contract and ownership are explicit
-- [ ] Timeout and error behavior are defined
-- [ ] Compatibility is tested
-- [ ] Failure responses are observable
+- [ ] Contract schema/fixtures updated for changed fields.
+- [ ] Timeout, retry, and idempotency behavior is explicit.
+- [ ] Authentication/signature checks are validated.
+- [ ] Consumer behavior under provider errors is tested.
+- [ ] Provider-specific assumptions are documented with versions.
 
 ## Anti-patterns
-- Marking work complete from intuition instead of recorded evidence.
-- Expanding scope without a planned task and owner.
+- Embedding provider payload structures across business logic layers.
+- Treating 2xx-only testing as sufficient integration coverage.
+- Ignoring provider version drift and deprecations.
 
 ## Output
-Record the decision, evidence paths, and residual risk in the workflow state and the appropriate .ai-work report.
+Hardened integration adapter plus contract and failure-mode evidence.

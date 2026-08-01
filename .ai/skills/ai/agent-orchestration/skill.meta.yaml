@@ -1,0 +1,13 @@
+name: agent-orchestration
+domain: ai
+version: 1.0.0
+status: active
+owner: backend
+reviewed_at: 2026-08-01
+reviewers: [reviewer, backend]
+depends_on: [core/workflow-orchestration, core/architecture-decisions]
+triggers: [architecture, pipeline]
+documents: [overview.md, patterns.md, best-practices.md, pitfalls.md, examples.md]
+deprecated: false
+entrypoint: .ai/skills/ai/agent-orchestration/overview.md
+path: .ai/skills/ai/agent-orchestration
