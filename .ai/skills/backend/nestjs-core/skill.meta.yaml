@@ -1,12 +1,3 @@
-<<<<<<< HEAD
-skill_name: NestJS Core
-domain: backend
-technology: nestjs-core
-owner: backend
-version: "1.0"
-reviewed_at: "2026-08-01"
-supported_stack: [nestjs, nodejs]
-=======
 name: nestjs-core
 domain: backend
 version: 1.0.0
@@ -20,4 +11,3 @@ documents: [overview.md, patterns.md, best-practices.md, pitfalls.md, examples.m
 deprecated: false
 entrypoint: .ai/skills/backend/nestjs-core/overview.md
 path: .ai/skills/backend/nestjs-core
->>>>>>> origin/main

@@ -1,10 +1,6 @@
 # Kubernetes Best Practices
 
-<<<<<<< HEAD
-Set both `requests` and `limits` for CPU and memory on every container; omitting `requests` breaks scheduling guarantees. Use `PodDisruptionBudgets` for workloads that must maintain availability during node drains. Validate manifests with `kubectl apply --dry-run=server` before applying. Pin container images to a specific digest or tag; avoid `latest`. Use Network Policies to restrict pod-to-pod traffic. Enable audit logging and monitor it. Apply resource quotas and limit ranges per namespace to prevent resource exhaustion. Store secrets in a vault (HashiCorp Vault, AWS Secrets Manager, Sealed Secrets); do not commit plain Kubernetes Secret manifests with real values.
-=======
 - Keep manifests DRY through existing templating approach (Helm/Kustomize).
 - Validate RBAC least privilege for service accounts.
 - Define PodDisruptionBudget and horizontal scaling behavior where needed.
 - Capture rollout and rollback commands in release notes.
->>>>>>> origin/main

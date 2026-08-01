@@ -1,12 +1,3 @@
-<<<<<<< HEAD
-skill_name: OpenAI Integration
-domain: ai
-technology: openai
-owner: backend
-version: "1.0"
-reviewed_at: "2026-08-01"
-supported_stack: [openai, gpt, llm, ai]
-=======
 name: openai
 domain: ai
 version: 1.0.0
@@ -20,4 +11,3 @@ documents: [overview.md, patterns.md, best-practices.md, pitfalls.md, examples.m
 deprecated: false
 entrypoint: .ai/skills/ai/openai/overview.md
 path: .ai/skills/ai/openai
->>>>>>> origin/main

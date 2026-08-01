@@ -9,18 +9,16 @@ from __future__ import annotations
 
 import argparse
 import json
-<<<<<<< HEAD
 import re
-=======
 import shutil
 import subprocess
->>>>>>> origin/main
 import sys
 import tempfile
 import unittest
 from pathlib import Path
 
 ENGINE_DIR = Path(__file__).resolve().parents[1] / ".ai" / "engine"
+REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ENGINE_DIR))
 import ai_kit  # noqa: E402
 
@@ -458,446 +456,6 @@ class DagPayloadTests(EngineTestCase):
         self.assertEqual(dag["waves"], 3)
 
 
-<<<<<<< HEAD
-# ---------------------------------------------------------------------------
-# Routing, trigger matching, explain output, handoff, and metadata tests
-# ---------------------------------------------------------------------------
-
-REPO_ROOT = Path(__file__).resolve().parents[1]
-
-
-class RouteTestCase(EngineTestCase):
-    """Tests for cmd_route: skill selection, trigger matching, and explain."""
-
-    def setUp(self) -> None:
-        super().setUp()
-        # Build minimal skill tree under temp root
-        skill_root = self.root / ".ai" / "skills"
-        # backend domain
-        for tech in ("nestjs-core",):
-            d = skill_root / "backend" / tech
-            d.mkdir(parents=True, exist_ok=True)
-            (d / "overview.md").write_text(f"# {tech} overview", encoding="utf-8")
-        # ai domain
-        for tech in ("openai", "rag"):
-            d = skill_root / "ai" / tech
-            d.mkdir(parents=True, exist_ok=True)
-            (d / "overview.md").write_text(f"# {tech} overview", encoding="utf-8")
-        # core skill
-        core = skill_root / "core" / "api-contract"
-        core.mkdir(parents=True, exist_ok=True)
-        (core / "SKILL.md").write_text("# api-contract", encoding="utf-8")
-        # registry.yaml with backend owning backend and ai domains
-        reg = self.root / ".ai-config" / "registry.yaml"
-        reg.write_text(
-            "version: 2.0.0\n"
-            "owners:\n"
-            "  backend: [backend, ai]\n"
-            "  frontend: [frontend]\n",
-            encoding="utf-8",
-        )
-        # kit.yaml with empty stack
-        kit = self.root / ".ai-config" / "kit.yaml"
-        kit.write_text("project:\n  stack: []\n", encoding="utf-8")
-        # point ai_kit at temp root
-        ai_kit.ROOT = self.root
-
-    def _route(self, task_id: str, explain: bool = False) -> dict:
-        return ai_kit.cmd_route(ns(state=str(self.state_file), id=task_id, explain=explain))
-
-    # -- backward-compatible keys -------------------------------------------
-
-    def test_route_returns_required_keys(self) -> None:
-        self.init_workflow()
-        self.add_task("T1", owner="backend", tags=["nestjs-core"])
-        result = self._route("T1")
-        for key in ("task", "owner", "tags", "role_contract", "skills", "context"):
-            self.assertIn(key, result)
-
-    def test_route_selects_correct_domain_skills(self) -> None:
-        self.init_workflow()
-        self.add_task("T1", owner="backend", tags=["nestjs-core"])
-        result = self._route("T1")
-        skill_paths = result["skills"]
-        # must include the nestjs-core overview.md (stack tag match)
-        self.assertTrue(
-            any("nestjs-core" in s for s in skill_paths),
-            f"nestjs-core not in skills: {skill_paths}",
-        )
-        # must include api-contract core skill
-        self.assertTrue(
-            any("api-contract" in s for s in skill_paths),
-            f"api-contract not in skills: {skill_paths}",
-        )
-
-    def test_route_excludes_unrelated_skills(self) -> None:
-        """A task for the backend role must not load frontend skills."""
-        frontend = self.root / ".ai" / "skills" / "frontend" / "vue"
-        frontend.mkdir(parents=True, exist_ok=True)
-        (frontend / "overview.md").write_text("# vue", encoding="utf-8")
-        self.init_workflow()
-        self.add_task("T1", owner="backend", tags=["nestjs-core"])
-        result = self._route("T1")
-        self.assertFalse(
-            any("frontend" in s for s in result["skills"]),
-            f"frontend skill should not appear: {result['skills']}",
-        )
-
-    def test_route_loading_order_present(self) -> None:
-        self.init_workflow()
-        self.add_task("T1", owner="backend", tags=[])
-        result = self._route("T1")
-        self.assertIn("loading_order", result)
-        order = result["loading_order"]
-        self.assertTrue(any("overview.md" in step for step in order), "overview.md must appear in loading_order")
-        self.assertTrue(any("role_contract" in step for step in order), "role_contract must appear in loading_order")
-
-    # -- AI trigger matching ------------------------------------------------
-
-    def test_llm_trigger_fires_on_keyword(self) -> None:
-        self.init_workflow()
-        self.add_task("T1", owner="backend", tags=[],
-                       title="Implement LLM completion endpoint")
-        result = self._route("T1")
-        self.assertIn("llm", result["triggered_by"])
-        self.assertTrue(
-            any("openai" in s for s in result["skills"]),
-            "llm trigger must add openai skill",
-        )
-
-    def test_rag_trigger_fires_on_tag(self) -> None:
-        self.init_workflow()
-        self.add_task("T1", owner="backend", tags=["rag"])
-        result = self._route("T1")
-        self.assertIn("rag", result["triggered_by"])
-        self.assertTrue(
-            any("rag" in s for s in result["skills"]),
-            "rag trigger must add rag skill",
-        )
-
-    def test_no_trigger_on_unrelated_task(self) -> None:
-        self.init_workflow()
-        self.add_task("T1", owner="backend", tags=["nestjs-core"],
-                       title="Refactor user service")
-        result = self._route("T1")
-        self.assertEqual(result["triggered_by"], [])
-        self.assertEqual(result["extra_concerns"], [])
-
-    def test_trigger_extra_concerns_populated(self) -> None:
-        self.init_workflow()
-        self.add_task("T1", owner="backend", tags=[], title="Add RAG retrieval pipeline")
-        result = self._route("T1")
-        self.assertIn("rag", result["triggered_by"])
-        # rag trigger should flag security and qa as extra concerns
-        for concern in ("security", "qa"):
-            self.assertIn(concern, result["extra_concerns"])
-
-    def test_trigger_does_not_duplicate_existing_skills(self) -> None:
-        """If a trigger adds a skill that the domain scan already selected,
-        it should appear only once in skills."""
-        self.init_workflow()
-        # backend owns ai domain → openai already selected; llm trigger also adds openai
-        self.add_task("T1", owner="backend", tags=[], title="Build LLM inference service")
-        result = self._route("T1")
-        openai_skills = [s for s in result["skills"] if "openai" in s]
-        self.assertEqual(len(openai_skills), 1, f"openai appeared {len(openai_skills)} times: {openai_skills}")
-
-    # -- explain output -----------------------------------------------------
-
-    def test_explain_key_absent_by_default(self) -> None:
-        self.init_workflow()
-        self.add_task("T1", owner="backend", tags=[])
-        result = self._route("T1", explain=False)
-        self.assertNotIn("explain", result)
-
-    def test_explain_key_present_when_requested(self) -> None:
-        self.init_workflow()
-        self.add_task("T1", owner="backend", tags=[])
-        result = self._route("T1", explain=True)
-        self.assertIn("explain", result)
-
-    def test_explain_contains_required_fields(self) -> None:
-        self.init_workflow()
-        self.add_task("T1", owner="backend", tags=[])
-        explain = self._route("T1", explain=True)["explain"]
-        for field in ("role_owner_mapping", "stack_match", "trigger_matches",
-                      "skill_selection", "excluded_domains"):
-            self.assertIn(field, explain, f"explain missing field: {field}")
-
-    def test_explain_role_owner_mapping(self) -> None:
-        self.init_workflow()
-        self.add_task("T1", owner="backend", tags=[])
-        explain = self._route("T1", explain=True)["explain"]
-        mapping = explain["role_owner_mapping"]
-        self.assertEqual(mapping["role"], "backend")
-        self.assertIn("backend", mapping["domains"])
-        self.assertIn("ai", mapping["domains"])
-
-    def test_explain_excluded_domains(self) -> None:
-        """frontend domain should appear in excluded_domains for a backend task."""
-        # create a frontend skill so it is discoverable
-        fe = self.root / ".ai" / "skills" / "frontend" / "vue"
-        fe.mkdir(parents=True, exist_ok=True)
-        (fe / "overview.md").write_text("# vue", encoding="utf-8")
-        self.init_workflow()
-        self.add_task("T1", owner="backend", tags=[])
-        explain = self._route("T1", explain=True)["explain"]
-        self.assertIn("frontend", explain["excluded_domains"])
-
-    def test_explain_trigger_matches_populated(self) -> None:
-        self.init_workflow()
-        self.add_task("T1", owner="backend", tags=["rag"])
-        explain = self._route("T1", explain=True)["explain"]
-        trigger_names = [t["trigger"] for t in explain["trigger_matches"]]
-        self.assertIn("rag", trigger_names)
-
-    def test_explain_skill_selection_reason(self) -> None:
-        self.init_workflow()
-        self.add_task("T1", owner="backend", tags=["nestjs-core"])
-        explain = self._route("T1", explain=True)["explain"]
-        reasons = {entry["skill"]: entry["reason"] for entry in explain["skill_selection"]}
-        nestjs_key = next((k for k in reasons if "nestjs-core" in k), None)
-        self.assertIsNotNone(nestjs_key, "nestjs-core skill not in skill_selection")
-        self.assertIn("domain scan", reasons[nestjs_key])
-
-    def test_explain_json_backward_compatible(self) -> None:
-        """skills and other original keys must still be present alongside explain."""
-        self.init_workflow()
-        self.add_task("T1", owner="backend", tags=[])
-        result = self._route("T1", explain=True)
-        for key in ("task", "owner", "tags", "role_contract", "skills", "context"):
-            self.assertIn(key, result)
-
-
-class TriggerUnitTests(unittest.TestCase):
-    """Unit tests for _match_triggers() directly."""
-
-    def test_llm_keyword_match(self) -> None:
-        matches = ai_kit._match_triggers("Implement LLM inference endpoint", [])
-        names = [m["name"] for m in matches]
-        self.assertIn("llm", names)
-
-    def test_rag_tag_match(self) -> None:
-        matches = ai_kit._match_triggers("Add retrieval feature", ["rag"])
-        names = [m["name"] for m in matches]
-        self.assertIn("rag", names)
-
-    def test_no_match_on_unrelated(self) -> None:
-        matches = ai_kit._match_triggers("Refactor authentication service", ["backend"])
-        self.assertEqual(matches, [])
-
-    def test_prompt_injection_keyword(self) -> None:
-        matches = ai_kit._match_triggers("Protect against prompt injection attacks", [])
-        names = [m["name"] for m in matches]
-        self.assertIn("prompt-injection", names)
-
-    def test_evaluation_keyword(self) -> None:
-        matches = ai_kit._match_triggers("Set up evaluation pipeline for RAG", [])
-        names = [m["name"] for m in matches]
-        self.assertIn("evaluation", names)
-
-    def test_trigger_returns_extra_skills_and_concerns(self) -> None:
-        matches = ai_kit._match_triggers("Build LLM service", [])
-        llm = next(m for m in matches if m["name"] == "llm")
-        self.assertIn("extra_skills", llm)
-        self.assertIn("extra_concerns", llm)
-        self.assertIn("security", llm["extra_concerns"])
-
-    def test_matched_via_populated(self) -> None:
-        tag_matches = ai_kit._match_triggers("generic task", ["rag"])
-        kw_matches = ai_kit._match_triggers("LLM inference task", [])
-        self.assertEqual(tag_matches[0]["matched_via"], "tag")
-        self.assertEqual(kw_matches[0]["matched_via"], "keyword")
-
-
-class CheckSkillsScriptTests(unittest.TestCase):
-    """Tests for .ai/scripts/check-skills.sh placeholder and metadata validation."""
-
-    SCRIPT = REPO_ROOT / ".ai" / "scripts" / "check-skills.sh"
-
-    def _run(self, mode: str | None = None) -> tuple[int, str]:
-        import subprocess
-        cmd = ["bash", str(self.SCRIPT)]
-        if mode:
-            cmd.append(mode)
-        result = subprocess.run(cmd, capture_output=True, text=True, cwd=str(REPO_ROOT))
-        return result.returncode, result.stdout + result.stderr
-
-    def test_ai_mode_passes(self) -> None:
-        rc, output = self._run("ai")
-        self.assertEqual(rc, 0, f"check-skills.sh ai failed:\n{output}")
-
-    def test_all_mode_passes(self) -> None:
-        rc, output = self._run("all")
-        self.assertEqual(rc, 0, f"check-skills.sh all failed:\n{output}")
-
-    def test_default_mode_passes(self) -> None:
-        rc, output = self._run(None)
-        self.assertEqual(rc, 0, f"check-skills.sh (default) failed:\n{output}")
-
-    def test_placeholder_detected(self) -> None:
-        import subprocess, tempfile, shutil
-        with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
-            # copy just the scripts and create a fake skill with placeholder
-            scripts = tmp_path / ".ai" / "scripts"
-            scripts.mkdir(parents=True)
-            script_dest = scripts / "check-skills.sh"
-            shutil.copy(str(self.SCRIPT), str(script_dest))
-            fake = tmp_path / ".ai" / "skills" / "ai" / "fake-skill"
-            fake.mkdir(parents=True)
-            for doc in ("overview", "patterns", "best-practices", "pitfalls", "examples"):
-                (fake / f"{doc}.md").write_text("PLACEHOLDER content here", encoding="utf-8")
-            # metadata
-            (fake / "skill.meta.yaml").write_text(
-                "skill_name: Fake\ndomain: ai\ntechnology: fake-skill\n"
-                "owner: backend\nversion: \"1.0\"\nreviewed_at: \"2026-08-01\"\n"
-                "supported_stack: [fake]\n",
-                encoding="utf-8",
-            )
-            # also need core dir for the script not to crash
-            (tmp_path / ".ai" / "skills" / "core").mkdir(parents=True)
-            result = subprocess.run(
-                ["bash", str(script_dest), "ai"],
-                capture_output=True, text=True, cwd=str(tmp_path),
-            )
-            self.assertNotEqual(result.returncode, 0, "placeholder should cause failure")
-            self.assertIn("placeholder", (result.stdout + result.stderr).lower())
-
-    def test_missing_metadata_detected(self) -> None:
-        import subprocess, tempfile, shutil
-        with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
-            scripts = tmp_path / ".ai" / "scripts"
-            scripts.mkdir(parents=True)
-            script_dest = scripts / "check-skills.sh"
-            shutil.copy(str(self.SCRIPT), str(script_dest))
-            fake = tmp_path / ".ai" / "skills" / "ai" / "no-meta"
-            fake.mkdir(parents=True)
-            for doc in ("overview", "patterns", "best-practices", "pitfalls", "examples"):
-                (fake / f"{doc}.md").write_text(f"# {doc} real content here", encoding="utf-8")
-            # no skill.meta.yaml
-            (tmp_path / ".ai" / "skills" / "core").mkdir(parents=True)
-            result = subprocess.run(
-                ["bash", str(script_dest), "ai"],
-                capture_output=True, text=True, cwd=str(tmp_path),
-            )
-            self.assertNotEqual(result.returncode, 0, "missing metadata should cause failure")
-            self.assertIn("skill.meta.yaml", result.stdout + result.stderr)
-
-    def test_malformed_metadata_detected(self) -> None:
-        import subprocess, tempfile, shutil
-        with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
-            scripts = tmp_path / ".ai" / "scripts"
-            scripts.mkdir(parents=True)
-            script_dest = scripts / "check-skills.sh"
-            shutil.copy(str(self.SCRIPT), str(script_dest))
-            fake = tmp_path / ".ai" / "skills" / "ai" / "bad-meta"
-            fake.mkdir(parents=True)
-            for doc in ("overview", "patterns", "best-practices", "pitfalls", "examples"):
-                (fake / f"{doc}.md").write_text(f"# {doc} real content here", encoding="utf-8")
-            # bad reviewed_at
-            (fake / "skill.meta.yaml").write_text(
-                "skill_name: Bad\ndomain: ai\ntechnology: bad-meta\n"
-                "owner: backend\nversion: \"1.0\"\nreviewed_at: \"not-a-date\"\n"
-                "supported_stack: [bad]\n",
-                encoding="utf-8",
-            )
-            (tmp_path / ".ai" / "skills" / "core").mkdir(parents=True)
-            result = subprocess.run(
-                ["bash", str(script_dest), "ai"],
-                capture_output=True, text=True, cwd=str(tmp_path),
-            )
-            self.assertNotEqual(result.returncode, 0, "bad reviewed_at should cause failure")
-
-
-class SkillMetadataTests(unittest.TestCase):
-    """Verify skill.meta.yaml exists and has correct content for all technology skills."""
-
-    SKILLS_ROOT = REPO_ROOT / ".ai" / "skills"
-    REQUIRED_FIELDS = ("skill_name", "domain", "technology", "owner", "version",
-                       "reviewed_at", "supported_stack")
-
-    def _tech_dirs(self) -> list[Path]:
-        dirs = []
-        for domain_dir in self.SKILLS_ROOT.iterdir():
-            if not domain_dir.is_dir() or domain_dir.name == "core":
-                continue
-            for tech_dir in domain_dir.iterdir():
-                if tech_dir.is_dir():
-                    dirs.append(tech_dir)
-        return sorted(dirs)
-
-    def test_all_tech_skills_have_meta(self) -> None:
-        missing = [d for d in self._tech_dirs() if not (d / "skill.meta.yaml").exists()]
-        self.assertEqual(missing, [], f"Missing skill.meta.yaml in: {missing}")
-
-    def test_meta_has_required_fields(self) -> None:
-        for tech_dir in self._tech_dirs():
-            meta = (tech_dir / "skill.meta.yaml").read_text(encoding="utf-8")
-            for field in self.REQUIRED_FIELDS:
-                self.assertIn(f"{field}:", meta,
-                              f"{tech_dir.relative_to(REPO_ROOT)}/skill.meta.yaml missing field '{field}'")
-
-    def test_reviewed_at_format(self) -> None:
-        import re
-        pattern = re.compile(r"^reviewed_at:\s*['\"]?(\d{4}-\d{2}-\d{2})['\"]?", re.MULTILINE)
-        for tech_dir in self._tech_dirs():
-            meta = (tech_dir / "skill.meta.yaml").read_text(encoding="utf-8")
-            m = pattern.search(meta)
-            self.assertIsNotNone(m, f"{tech_dir.name}/skill.meta.yaml: reviewed_at missing or wrong format")
-
-    def test_domain_matches_directory(self) -> None:
-        import re
-        for tech_dir in self._tech_dirs():
-            expected_domain = tech_dir.parent.name
-            meta = (tech_dir / "skill.meta.yaml").read_text(encoding="utf-8")
-            m = re.search(r"^domain:\s*['\"]?(\S+?)['\"]?\s*$", meta, re.MULTILINE)
-            self.assertIsNotNone(m, f"{tech_dir.name}: domain field not found")
-            self.assertEqual(m.group(1), expected_domain,
-                             f"{tech_dir.name}: domain '{m.group(1)}' != dir '{expected_domain}'")
-
-    def test_technology_matches_directory(self) -> None:
-        import re
-        for tech_dir in self._tech_dirs():
-            expected_tech = tech_dir.name
-            meta = (tech_dir / "skill.meta.yaml").read_text(encoding="utf-8")
-            m = re.search(r"^technology:\s*['\"]?(\S+?)['\"]?\s*$", meta, re.MULTILINE)
-            self.assertIsNotNone(m, f"{tech_dir.name}: technology field not found")
-            self.assertEqual(m.group(1), expected_tech,
-                             f"{tech_dir.name}: technology '{m.group(1)}' != dir '{expected_tech}'")
-
-
-class SkillContentTests(unittest.TestCase):
-    """Verify that technology skill documents contain no placeholder markers."""
-
-    SKILLS_ROOT = REPO_ROOT / ".ai" / "skills"
-    PLACEHOLDER_PATTERN = re.compile(r"PLACEHOLDER|not yet written|generic kit template", re.IGNORECASE)
-
-    def _tech_docs(self) -> list[Path]:
-        docs = []
-        for domain_dir in self.SKILLS_ROOT.iterdir():
-            if not domain_dir.is_dir() or domain_dir.name == "core":
-                continue
-            for tech_dir in domain_dir.iterdir():
-                if not tech_dir.is_dir():
-                    continue
-                for doc in ("overview", "patterns", "best-practices", "pitfalls", "examples"):
-                    path = tech_dir / f"{doc}.md"
-                    if path.exists():
-                        docs.append(path)
-        return sorted(docs)
-
-    def test_no_placeholder_in_skill_docs(self) -> None:
-        import re
-        flagged = []
-        for path in self._tech_docs():
-            text = path.read_text(encoding="utf-8")
-            if re.search(r"PLACEHOLDER|not yet written|generic kit template", text, re.IGNORECASE):
-                flagged.append(str(path.relative_to(REPO_ROOT)))
-        self.assertEqual(flagged, [], f"Placeholder content found in: {flagged}")
-=======
 class RoutingAndSkillMetadataTests(EngineTestCase):
     def _write_skill(self, relative: str) -> None:
         skill_dir = self.root / relative
@@ -1175,7 +733,89 @@ class CheckSkillsScriptTests(unittest.TestCase):
         result = self._run("all")
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("missing required field", result.stderr)
->>>>>>> origin/main
+
+
+class SkillMetadataTests(unittest.TestCase):
+    """Verify skill.meta.yaml exists and has correct content for all technology skills."""
+
+    SKILLS_ROOT = REPO_ROOT / ".ai" / "skills"
+    REQUIRED_FIELDS = ("name", "domain", "version", "owner", "reviewed_at",
+                       "documents", "entrypoint", "path")
+
+    def _tech_dirs(self) -> list[Path]:
+        dirs = []
+        for domain_dir in self.SKILLS_ROOT.iterdir():
+            if not domain_dir.is_dir() or domain_dir.name == "core":
+                continue
+            for tech_dir in domain_dir.iterdir():
+                if tech_dir.is_dir():
+                    dirs.append(tech_dir)
+        return sorted(dirs)
+
+    def test_all_tech_skills_have_meta(self) -> None:
+        missing = [d for d in self._tech_dirs() if not (d / "skill.meta.yaml").exists()]
+        self.assertEqual(missing, [], f"Missing skill.meta.yaml in: {missing}")
+
+    def test_meta_has_required_fields(self) -> None:
+        for tech_dir in self._tech_dirs():
+            meta = (tech_dir / "skill.meta.yaml").read_text(encoding="utf-8")
+            for field in self.REQUIRED_FIELDS:
+                self.assertIn(f"{field}:", meta,
+                              f"{tech_dir.relative_to(REPO_ROOT)}/skill.meta.yaml missing field '{field}'")
+
+    def test_reviewed_at_format(self) -> None:
+        pattern = re.compile(r"^reviewed_at:\s*['\"]?(\d{4}-\d{2}-\d{2})['\"]?", re.MULTILINE)
+        for tech_dir in self._tech_dirs():
+            meta = (tech_dir / "skill.meta.yaml").read_text(encoding="utf-8")
+            m = pattern.search(meta)
+            self.assertIsNotNone(m, f"{tech_dir.name}/skill.meta.yaml: reviewed_at missing or wrong format")
+
+    def test_domain_matches_directory(self) -> None:
+        for tech_dir in self._tech_dirs():
+            expected_domain = tech_dir.parent.name
+            meta = (tech_dir / "skill.meta.yaml").read_text(encoding="utf-8")
+            m = re.search(r"^domain:\s*['\"]?(\S+?)['\"]?\s*$", meta, re.MULTILINE)
+            self.assertIsNotNone(m, f"{tech_dir.name}: domain field not found")
+            self.assertEqual(m.group(1), expected_domain,
+                             f"{tech_dir.name}: domain '{m.group(1)}' != dir '{expected_domain}'")
+
+    def test_name_matches_directory(self) -> None:
+        for tech_dir in self._tech_dirs():
+            expected_name = tech_dir.name
+            meta = (tech_dir / "skill.meta.yaml").read_text(encoding="utf-8")
+            m = re.search(r"^name:\s*['\"]?(\S+?)['\"]?\s*$", meta, re.MULTILINE)
+            self.assertIsNotNone(m, f"{tech_dir.name}: name field not found")
+            self.assertEqual(m.group(1), expected_name,
+                             f"{tech_dir.name}: name '{m.group(1)}' != dir '{expected_name}'")
+
+
+class SkillContentTests(unittest.TestCase):
+    """Verify that technology skill documents contain no placeholder markers."""
+
+    SKILLS_ROOT = REPO_ROOT / ".ai" / "skills"
+    PLACEHOLDER_PATTERN = re.compile(r"PLACEHOLDER|not yet written|generic kit template", re.IGNORECASE)
+
+    def _tech_docs(self) -> list[Path]:
+        docs = []
+        for domain_dir in self.SKILLS_ROOT.iterdir():
+            if not domain_dir.is_dir() or domain_dir.name == "core":
+                continue
+            for tech_dir in domain_dir.iterdir():
+                if not tech_dir.is_dir():
+                    continue
+                for doc in ("overview", "patterns", "best-practices", "pitfalls", "examples"):
+                    path = tech_dir / f"{doc}.md"
+                    if path.exists():
+                        docs.append(path)
+        return sorted(docs)
+
+    def test_no_placeholder_in_skill_docs(self) -> None:
+        flagged = []
+        for path in self._tech_docs():
+            text = path.read_text(encoding="utf-8")
+            if self.PLACEHOLDER_PATTERN.search(text):
+                flagged.append(str(path.relative_to(REPO_ROOT)))
+        self.assertEqual(flagged, [], f"Placeholder content found in: {flagged}")
 
 
 if __name__ == "__main__":

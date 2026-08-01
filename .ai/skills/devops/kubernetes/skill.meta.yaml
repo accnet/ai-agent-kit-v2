@@ -1,12 +1,3 @@
-<<<<<<< HEAD
-skill_name: Kubernetes
-domain: devops
-technology: kubernetes
-owner: devops
-version: "1.0"
-reviewed_at: "2026-08-01"
-supported_stack: [kubernetes, k8s, helm, kustomize]
-=======
 name: kubernetes
 domain: devops
 version: 1.0.0
@@ -20,4 +11,3 @@ documents: [overview.md, patterns.md, best-practices.md, pitfalls.md, examples.m
 deprecated: false
 entrypoint: .ai/skills/devops/kubernetes/overview.md
 path: .ai/skills/devops/kubernetes
->>>>>>> origin/main

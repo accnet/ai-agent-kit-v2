@@ -1,12 +1,3 @@
-<<<<<<< HEAD
-skill_name: Vite Frontend
-domain: frontend
-technology: vite-frontend
-owner: frontend
-version: "1.0"
-reviewed_at: "2026-08-01"
-supported_stack: [vite, frontend]
-=======
 name: vite-frontend
 domain: frontend
 version: 1.0.0
@@ -20,4 +11,3 @@ documents: [overview.md, patterns.md, best-practices.md, pitfalls.md, examples.m
 deprecated: false
 entrypoint: .ai/skills/frontend/vite-frontend/overview.md
 path: .ai/skills/frontend/vite-frontend
->>>>>>> origin/main

@@ -538,89 +538,6 @@ TRANSITIONS = {
     "reject": ({"implementation-complete", "qa-passed"}, "todo"),
 }
 
-# AI concern trigger registry.
-# Each trigger maps task text/tag signals to extra skills and cross-cutting
-# concerns.  Only triggers whose keywords appear in the task title (case-
-# insensitive) or whose tags intersect the task's tag set are activated.
-# Triggers never suppress already-selected skills; they only ADD to them.
-# Precedence: owner→domain skill scan runs first, then trigger augmentation.
-AI_TRIGGERS: dict[str, dict] = {
-    "llm": {
-        "keywords": ["llm", "language model", "gpt", "claude", "gemini", "inference", "generation", "completion"],
-        "tags": ["llm", "ai", "openai", "anthropic", "gemini"],
-        "extra_skills": [".ai/skills/ai/openai/overview.md"],
-        "extra_concerns": ["security", "performance"],
-        "reason": "Task involves LLM/model usage; load openai skill and flag security+performance concerns.",
-    },
-    "rag": {
-        "keywords": ["rag", "retrieval", "vector", "embedding", "chunk", "semantic search", "knowledge base"],
-        "tags": ["rag", "retrieval", "embeddings", "vector"],
-        "extra_skills": [".ai/skills/ai/rag/overview.md"],
-        "extra_concerns": ["security", "qa"],
-        "reason": "Task involves RAG/retrieval; load rag skill and flag security (prompt injection) + qa concerns.",
-    },
-    "prompt-injection": {
-        "keywords": ["prompt injection", "indirect injection", "jailbreak", "adversarial prompt"],
-        "tags": ["prompt-injection", "ai-security"],
-        "extra_skills": [],
-        "extra_concerns": ["security"],
-        "reason": "Prompt injection risk detected; escalate security concern.",
-    },
-    "latency-cost": {
-        "keywords": ["latency", "token budget", "token cost", "rate limit", "throughput", "cost optimis", "cost optim"],
-        "tags": ["latency", "cost", "token", "rate-limit"],
-        "extra_skills": [],
-        "extra_concerns": ["performance"],
-        "reason": "AI latency/cost/token concern detected; flag performance concern.",
-    },
-    "external-provider": {
-        "keywords": ["openai api", "anthropic api", "cohere", "mistral", "huggingface", "provider contract", "model provider"],
-        "tags": ["openai", "anthropic", "provider", "external-api"],
-        "extra_skills": [".ai/skills/ai/openai/overview.md"],
-        "extra_concerns": ["integration"],
-        "reason": "External AI provider/API contract detected; load openai skill and flag integration concern.",
-    },
-    "evaluation": {
-        "keywords": ["eval", "benchmark", "recall@", "precision@", "faithfulness", "groundedness", "quality metric", "golden set"],
-        "tags": ["eval", "evaluation", "benchmark"],
-        "extra_skills": [".ai/skills/ai/rag/overview.md"],
-        "extra_concerns": ["qa"],
-        "reason": "AI/model evaluation detected; load rag skill (retrieval eval) and flag qa concern.",
-    },
-    "architecture": {
-        "keywords": ["ai architecture", "llm pipeline", "agent pipeline", "multi-agent", "orchestration"],
-        "tags": ["architecture", "pipeline", "ai-design"],
-        "extra_skills": [],
-        "extra_concerns": ["architect"],
-        "reason": "AI architecture/pipeline design detected; flag architect concern.",
-    },
-}
-
-
-def _match_triggers(title: str, tags: list[str]) -> list[dict]:
-    """Return all AI_TRIGGERS entries activated by the task title or tags.
-
-    A trigger fires when at least one of its keywords appears (case-insensitive
-    substring) in *title*, or when at least one of its tags intersects *tags*.
-    Returns a list of dicts with keys: name, reason, extra_skills,
-    extra_concerns.
-    """
-    lower_title = title.lower()
-    tag_set = {t.lower() for t in tags}
-    matched = []
-    for name, cfg in AI_TRIGGERS.items():
-        keyword_hit = any(kw in lower_title for kw in cfg["keywords"])
-        tag_hit = bool(tag_set & {t.lower() for t in cfg["tags"]})
-        if keyword_hit or tag_hit:
-            matched.append({
-                "name": name,
-                "reason": cfg["reason"],
-                "extra_skills": cfg["extra_skills"],
-                "extra_concerns": cfg["extra_concerns"],
-                "matched_via": "tag" if tag_hit else "keyword",
-            })
-    return matched
-
 
 class EngineError(Exception):
     pass
@@ -1253,19 +1170,6 @@ def cmd_plan(args: argparse.Namespace) -> dict:
 
 
 def cmd_route(args: argparse.Namespace) -> dict:
-    """Route a task to its role contract, technology skills, and core skills.
-
-    Output keys (all preserved for backward compatibility):
-      task, owner, tags, role_contract, skills, context
-
-    New keys (added; do not remove existing consumers):
-      triggered_by  – list of AI trigger names that fired (empty for non-AI tasks)
-      extra_concerns – list of cross-cutting concern roles flagged by triggers
-      loading_order – instruction list telling the agent how to load skill docs
-      explain       – present only when --explain flag is set; contains
-                      role_owner_mapping, stack_match, trigger_matches,
-                      skill_selection, and excluded_domains
-    """
     state = load(state_path(args.state)); validate(state)
     task = task_map(state).get(args.id)
     if not task:
@@ -1274,45 +1178,6 @@ def cmd_route(args: argparse.Namespace) -> dict:
     registry = _load_registry()
     domains = registry["owners"].get(role, ROLE_DOMAINS.get(role, []))
     skill_root = ROOT / ".ai" / "skills"
-<<<<<<< HEAD
-    skills: list[str] = []
-    skill_reasons: dict[str, str] = {}  # skill path -> reason (for --explain)
-    stack = configured_stack() | set(task.get("tags", []))
-
-    # 1. Domain skill scan (owner mapping)
-    for domain in domains:
-        folder = skill_root / domain
-        if folder.exists():
-            for path in sorted(folder.glob("*/overview.md")):
-                if not stack or path.parent.name in stack or domain in stack:
-                    rel = path.relative_to(ROOT).as_posix()
-                    skills.append(rel)
-                    skill_reasons[rel] = f"domain scan: role '{role}' owns domain '{domain}'; stack match" if stack else f"domain scan: role '{role}' owns domain '{domain}'"
-
-    # 2. Core skill assignment (role-specific)
-    core_names = CORE_BY_ROLE.get(role, ["skill-router"])
-    for name in core_names:
-        core_path = skill_root / "core" / name / "SKILL.md"
-        if core_path.exists():
-            rel = core_path.relative_to(ROOT).as_posix()
-            skills.append(rel)
-            skill_reasons[rel] = f"core skill for role '{role}'"
-
-    # 3. AI trigger augmentation (keyword/tag matching)
-    triggers = _match_triggers(task.get("title", ""), task.get("tags", []))
-    extra_concerns: list[str] = []
-    for trigger in triggers:
-        for extra in trigger["extra_skills"]:
-            if extra not in skills and (ROOT / extra).exists():
-                skills.append(extra)
-                skill_reasons[extra] = f"ai trigger '{trigger['name']}': {trigger['reason']}"
-        for concern in trigger["extra_concerns"]:
-            if concern not in extra_concerns:
-                extra_concerns.append(concern)
-
-    root = workspace(state_path(args.state))
-    result: dict = {
-=======
     tokens = _tokenize_task(task)
     task_text = _task_text(task)
     trigger_registry = _load_skill_triggers()
@@ -1433,62 +1298,11 @@ def cmd_route(args: argparse.Namespace) -> dict:
     skills = [item["entrypoint"] for item in all_details]
     root = workspace(state_path(args.state))
     response = {
->>>>>>> origin/main
         "task": task["id"],
         "owner": role,
         "tags": task["tags"],
         "role_contract": (Path(".ai") / "agents" / role).as_posix(),
         "skills": skills,
-<<<<<<< HEAD
-        "context": [
-            display_path(root / "plan" / "plan.md"),
-            display_path(root / "tasks" / "tasks.md"),
-            ".ai/engine/state-schema.md",
-        ] + task["files"],
-        "triggered_by": [t["name"] for t in triggers],
-        "extra_concerns": extra_concerns,
-        "loading_order": [
-            "1. Load role_contract documents for role rules and checklist.",
-            "2. For each entry in skills: load overview.md first to understand scope.",
-            "3. Load phase-specific documents (patterns.md, best-practices.md) as needed for the task.",
-            "4. Load pitfalls.md and examples.md when validating or writing evidence.",
-            "5. Load context files for workspace plan and task list.",
-        ],
-    }
-
-    # 4. Explain output (only when --explain is requested)
-    if getattr(args, "explain", False):
-        all_domains = {d.name for d in skill_root.iterdir() if d.is_dir() and d.name != "core"}
-        excluded = sorted(all_domains - set(domains))
-        result["explain"] = {
-            "role_owner_mapping": {
-                "role": role,
-                "domains": domains,
-                "source": "registry.yaml owners" if role in registry["owners"] else "ROLE_DOMAINS fallback",
-            },
-            "stack_match": {
-                "active_stack": sorted(stack),
-                "source": "kit.yaml project.stack + task tags",
-            },
-            "trigger_matches": [
-                {
-                    "trigger": t["name"],
-                    "matched_via": t["matched_via"],
-                    "reason": t["reason"],
-                    "extra_skills": t["extra_skills"],
-                    "extra_concerns": t["extra_concerns"],
-                }
-                for t in triggers
-            ],
-            "skill_selection": [
-                {"skill": s, "reason": skill_reasons.get(s, "unknown")}
-                for s in skills
-            ],
-            "excluded_domains": excluded,
-        }
-
-    return result
-=======
         "context": [display_path(root / "plan" / "plan.md"), display_path(root / "tasks" / "tasks.md"), ".ai/engine/state-schema.md"] + task["files"],
         "skill_details": all_details,
         "trigger_matches": trigger_matches,
@@ -1509,7 +1323,6 @@ def cmd_route(args: argparse.Namespace) -> dict:
             },
         }
     return response
->>>>>>> origin/main
 
 
 def cmd_context_add(args: argparse.Namespace) -> dict:
@@ -2402,11 +2215,7 @@ def parser() -> argparse.ArgumentParser:
     dispatch = sub.add_parser("dispatch"); dispatch.add_argument("id"); dispatch.add_argument("--runner"); dispatch.add_argument("--model"); dispatch.add_argument("--agent-id"); dispatch.set_defaults(fn=cmd_dispatch)
     dispatch_ready = sub.add_parser("dispatch-ready"); dispatch_ready.add_argument("--runner"); dispatch_ready.add_argument("--model"); dispatch_ready.add_argument("--limit", type=int); dispatch_ready.add_argument("--context"); dispatch_ready.add_argument("--epic"); dispatch_ready.add_argument("--agent-id"); dispatch_ready.set_defaults(fn=cmd_dispatch_ready)
     pipeline = sub.add_parser("pipeline"); pipeline.add_argument("id"); pipeline.add_argument("--agent-id"); pipeline.set_defaults(fn=cmd_pipeline)
-<<<<<<< HEAD
-    route = sub.add_parser("route"); route.add_argument("id"); route.add_argument("--explain", action="store_true", help="include explanation of why each skill/role was selected"); route.set_defaults(fn=cmd_route)
-=======
     route = sub.add_parser("route"); route.add_argument("id"); route.add_argument("--explain", action="store_true"); route.set_defaults(fn=cmd_route)
->>>>>>> origin/main
     status = sub.add_parser("status"); status.add_argument("--context"); status.add_argument("--epic"); status.set_defaults(fn=cmd_status)
     timeline = sub.add_parser("timeline"); timeline.set_defaults(fn=cmd_timeline)
     blocked = sub.add_parser("blocked"); blocked.set_defaults(fn=cmd_blocked)

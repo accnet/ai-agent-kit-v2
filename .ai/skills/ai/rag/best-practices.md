@@ -1,11 +1,7 @@
 # RAG Best Practices
 
-<<<<<<< HEAD
-Measure retrieval quality separately from generation quality: track recall@k and MRR for retrieval, and answer faithfulness/groundedness for generation. Set a similarity threshold for retrieval; return "no relevant documents found" rather than hallucinating when no document passes the threshold. Sanitise retrieved content before injecting into prompts — treat it as untrusted input to defend against prompt injection in stored documents. Apply access-control filtering at the retrieval layer, not only at the UI layer; users must never receive chunks they are not authorised to see. Keep an offline copy of the corpus for re-indexing; implement incremental updates to avoid full re-embedding on every document change. Test the pipeline end-to-end with a golden-set of question/answer/source triples.
-=======
 - Choose chunk size/overlap from measured retrieval quality, not intuition.
 - Enforce tenant/user ACL filters at query time and evaluation time.
 - Evaluate recall@k and answer faithfulness on a fixed benchmark set.
 - Treat retrieved text as untrusted input; sanitize before prompt assembly.
 - Cap context window budget and prefer reranking over blindly increasing k.
->>>>>>> origin/main

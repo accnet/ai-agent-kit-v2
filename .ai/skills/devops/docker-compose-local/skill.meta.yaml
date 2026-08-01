@@ -1,12 +1,3 @@
-<<<<<<< HEAD
-skill_name: Docker Compose Local
-domain: devops
-technology: docker-compose-local
-owner: devops
-version: "1.0"
-reviewed_at: "2026-08-01"
-supported_stack: [docker, compose, local, dev]
-=======
 name: docker-compose-local
 domain: devops
 version: 1.0.0
@@ -20,4 +11,3 @@ documents: [overview.md, patterns.md, best-practices.md, pitfalls.md, examples.m
 deprecated: false
 entrypoint: .ai/skills/devops/docker-compose-local/overview.md
 path: .ai/skills/devops/docker-compose-local
->>>>>>> origin/main

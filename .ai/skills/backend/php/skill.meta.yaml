@@ -1,12 +1,3 @@
-<<<<<<< HEAD
-skill_name: PHP Backend
-domain: backend
-technology: php
-owner: backend
-version: "1.0"
-reviewed_at: "2026-08-01"
-supported_stack: [php, laravel, symfony, slim]
-=======
 name: php
 domain: backend
 version: 1.0.0
@@ -20,4 +11,3 @@ documents: [overview.md, patterns.md, best-practices.md, pitfalls.md, examples.m
 deprecated: false
 entrypoint: .ai/skills/backend/php/overview.md
 path: .ai/skills/backend/php
->>>>>>> origin/main
