@@ -1607,9 +1607,9 @@ def _write_task_handoff(
     runner_label = f"{runner_name}/{model}" if model else runner_name
     state_flag = f" --state {state_arg}" if state_arg else ""
     instructions = (
-        f"Thực thi task theo acceptance criteria trên. Không vi phạm AGENTS.md. "
-        f"Khi xong, chạy: bash .ai/scripts/ai-kit{state_flag} transition {task['id']} "
-        f"complete --actor {task['owner']} --detail 'Hoàn thành bởi {runner_label}'"
+        f"Execute the task per the acceptance criteria above. Do not violate AGENTS.md. "
+        f"When done, run: bash .ai/scripts/ai-kit{state_flag} transition {task['id']} "
+        f"complete --actor {task['owner']} --detail 'Completed by {runner_label}'"
     )
     handoff = {
         "schema_version": 1,
@@ -1654,10 +1654,10 @@ def cmd_dispatch(args: argparse.Namespace) -> dict:
     if runner.get("input") == "json-file":
         handoff_path = _write_task_handoff(task, args.state, runner_name, runner, selected_model, getattr(args, "agent_id", None))
         handoff_display = display_path(handoff_path)
-        prompt = f"Bạn là {task['owner']}. Đọc và thực thi task JSON tại {handoff_display}. Không vi phạm AGENTS.md. Xong việc gọi lệnh: bash .ai/scripts/ai-kit{state_flag} transition {task['id']} complete --actor {task['owner']} --detail 'Hoàn thành bởi {runner_label}'"
+        prompt = f"You are {task['owner']}. Read and execute the task JSON at {handoff_display}. Do not violate AGENTS.md. When done, run: bash .ai/scripts/ai-kit{state_flag} transition {task['id']} complete --actor {task['owner']} --detail 'Completed by {runner_label}'"
     else:
         tasks_md = display_path(workspace(state_path(args.state)) / "tasks" / "tasks.md")
-        prompt = f"Bạn là {task['owner']}. Thực thi task {task['id']} theo yêu cầu trong {tasks_md}. Không vi phạm AGENTS.md. Xong việc gọi lệnh: bash .ai/scripts/ai-kit{state_flag} transition {task['id']} complete --actor {task['owner']} --detail 'Hoàn thành bởi {runner_label}'"
+        prompt = f"You are {task['owner']}. Execute task {task['id']} per the requirements in {tasks_md}. Do not violate AGENTS.md. When done, run: bash .ai/scripts/ai-kit{state_flag} transition {task['id']} complete --actor {task['owner']} --detail 'Completed by {runner_label}'"
     # Runner templates hold {prompt} unquoted; shlex.quote is the single
     # place quoting happens, so a template can never double-quote it.
     cmd = _render_runner_command(template, prompt, selected_model)

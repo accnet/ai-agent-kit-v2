@@ -194,6 +194,25 @@ rules.
 When a gate fails, leave the task open and record the failure. Do not hide
 retries or mark partial work complete.
 
+## Runner Autonomy
+
+`ai-kit dispatch`, `dispatch-ready`, and `pipeline` hand a task off to a
+configured runner CLI (`.ai-config/runners.yaml`) with stdin closed — the
+runner cannot pause to ask a human for per-action permission, so its command
+template necessarily includes a non-interactive/auto-approve flag
+(`--permission-mode acceptEdits`, `--auto-approve true`, `--allow-all-tools`,
+or the runner's equivalent). Without one, the runner's first tool-permission
+prompt would hang or fail with no way to answer it.
+
+This means the safety control for dispatched work is **not** per-action
+confirmation during execution; it is the G2/G3 evidence and review gates
+above, which run after the runner finishes. Do not dispatch a task to a
+runner against a repository or task where unsupervised, full-tool-access
+execution is unacceptable before that review happens. Runner model names in
+`runners.yaml` are point-in-time examples tied to each provider's current
+CLI — verify them against the installed CLI before relying on a pinned name,
+since they will drift out of date.
+
 ## Role Boundaries
 
 - Planner defines executable work and acceptance criteria; it does not invent
