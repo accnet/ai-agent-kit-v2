@@ -38,6 +38,7 @@
       <div class="view-tab active" data-view="architecture">Architecture</div>
       <div class="view-tab" data-view="runtime">Runtime</div>
       <div class="view-tab" data-view="replay">Replay</div>
+      <div class="view-tab" data-view="dag">DAG</div>
     </nav>
 
     <div class="hdr-right">
@@ -154,6 +155,15 @@
           </thead>
           <tbody id="replayBody"></tbody>
         </table>
+      </div>
+
+      <!-- DAG view: task-dependency graph from dag.json, deliberately kept
+           as its own standalone page (not a layer on the Architecture
+           canvas below, which graphs contexts/modules, not tasks) so each
+           answers one question without the other's controls in the way. -->
+      <div class="view-panel" id="viewDag" style="padding:0;">
+        <iframe src="dag.html" title="Task dependency DAG"
+                style="width:100%; height:100%; border:0; display:block;"></iframe>
       </div>
 
       <!-- CANVAS (Architecture view) -->

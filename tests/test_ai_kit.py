@@ -360,5 +360,97 @@ class ConcurrencyTests(EngineTestCase):
         self.assertEqual(task["status"], "in-progress")
 
 
+class DagPayloadTests(EngineTestCase):
+    """_generate_dag_payload() backs the visualizer's DAG tab: edges, layering
+    (wave number), lifecycle stage, ready set, and the weighted critical path."""
+
+    def _load_state(self) -> dict:
+        return json.loads(self.state_file.read_text(encoding="utf-8"))
+
+    def test_empty_workflow_yields_empty_dag(self) -> None:
+        self.init_workflow()
+        dag = ai_kit._generate_dag_payload(self._load_state())
+        self.assertEqual(dag, {"tasks": [], "edges": [], "waves": 0, "ready": [], "critical_path": []})
+
+    def test_layering_and_edges_on_a_branching_graph(self) -> None:
+        # T0 -> T1 -> T2, plus a parallel T3 depending on T0 only.
+        self.init_workflow()
+        self.add_task("T0")
+        self.add_task("T1", needs=["T0"])
+        self.add_task("T2", needs=["T1"])
+        self.add_task("T3", needs=["T0"])
+        dag = ai_kit._generate_dag_payload(self._load_state())
+        by_id = {t["id"]: t for t in dag["tasks"]}
+        self.assertEqual(by_id["T0"]["layer"], 0)
+        self.assertEqual(by_id["T1"]["layer"], 1)
+        self.assertEqual(by_id["T2"]["layer"], 2)
+        self.assertEqual(by_id["T3"]["layer"], 1)
+        self.assertEqual(dag["waves"], 3)
+        self.assertIn({"from": "T0", "to": "T1", "unlocked": False}, dag["edges"])
+        self.assertIn({"from": "T1", "to": "T2", "unlocked": False}, dag["edges"])
+        self.assertIn({"from": "T0", "to": "T3", "unlocked": False}, dag["edges"])
+        self.assertEqual(dag["ready"], ["T0"])
+
+    def test_unlocked_flips_once_upstream_is_done(self) -> None:
+        self.init_workflow()
+        self.add_task("T0")
+        self.add_task("T1", needs=["T0"])
+        self.transition("T0", "start", actor="backend")
+        self.transition("T0", "complete", actor="backend")
+        self.transition("T0", "qa-pass", actor="qa", evidence=[self.qa_evidence("T0")])
+        self.transition("T0", "review-approve", actor="reviewer", evidence=[self.review_evidence("T0")])
+        self.transition("T0", "close", actor="reviewer")
+        dag = ai_kit._generate_dag_payload(self._load_state())
+        edge = next(e for e in dag["edges"] if e["from"] == "T0" and e["to"] == "T1")
+        self.assertTrue(edge["unlocked"])
+        self.assertIn("T1", dag["ready"])
+        by_id = {t["id"]: t for t in dag["tasks"]}
+        self.assertEqual(by_id["T0"]["stage"], 5)
+        self.assertIn("todo", by_id["T0"]["history"])
+        self.assertIn("done", by_id["T0"]["history"])
+
+    def test_blocked_task_has_no_stage_but_max_weight(self) -> None:
+        self.init_workflow()
+        self.add_task("T0")
+        self.transition("T0", "start", actor="backend")
+        self.transition("T0", "block", actor="backend", detail="waiting on infra")
+        dag = ai_kit._generate_dag_payload(self._load_state())
+        task = dag["tasks"][0]
+        self.assertEqual(task["stage"], -1)
+        self.assertEqual(task["blocked_reason"], "waiting on infra")
+
+    def test_critical_path_prefers_chain_with_more_remaining_work(self) -> None:
+        # T0 -> T1 -> T2  (long chain, all still `todo`)
+        # T0 -> T3        (short chain)
+        # Finishing T0 shouldn't make the short branch "critical" just
+        # because it touches a completed task; the long chain still has
+        # more remaining stages and should win.
+        self.init_workflow()
+        self.add_task("T0")
+        self.add_task("T1", needs=["T0"])
+        self.add_task("T2", needs=["T1"])
+        self.add_task("T3", needs=["T0"])
+        self.transition("T0", "start", actor="backend")
+        self.transition("T0", "complete", actor="backend")
+        self.transition("T0", "qa-pass", actor="qa", evidence=[self.qa_evidence("T0")])
+        self.transition("T0", "review-approve", actor="reviewer", evidence=[self.review_evidence("T0")])
+        self.transition("T0", "close", actor="reviewer")
+        dag = ai_kit._generate_dag_payload(self._load_state())
+        self.assertEqual(dag["critical_path"], ["T1", "T2"])
+
+    def test_diamond_dependency_layers_by_longest_path(self) -> None:
+        # T0 -> T1 -> T3
+        # T0 -> T2 -> T3   (T3 needs both T1 and T2; longest path wins)
+        self.init_workflow()
+        self.add_task("T0")
+        self.add_task("T1", needs=["T0"])
+        self.add_task("T2", needs=["T0"])
+        self.add_task("T3", needs=["T1", "T2"])
+        dag = ai_kit._generate_dag_payload(self._load_state())
+        by_id = {t["id"]: t for t in dag["tasks"]}
+        self.assertEqual(by_id["T3"]["layer"], 2)
+        self.assertEqual(dag["waves"], 3)
+
+
 if __name__ == "__main__":
     unittest.main()

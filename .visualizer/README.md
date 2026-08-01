@@ -1,6 +1,20 @@
 # AI-Kit Visualizer
 
-Visualizer dùng layout dashboard từ `diagram.html`, đã tách thành `index.html` (markup), `style.css` (CSS) và `app.js` (script). Header có search, view tabs **Evolution / Architecture / Runtime / Replay**; trung tâm là Architecture canvas, hai sidebar là module tree, thống kê, agent/event stream và inspector.
+Visualizer dùng layout dashboard từ `diagram.html`, đã tách thành `index.html` (markup), `style.css` (CSS) và `app.js` (script). Header có search, view tabs **Evolution / Architecture / Runtime / Replay / DAG**; trung tâm là Architecture canvas, hai sidebar là module tree, thống kê, agent/event stream và inspector.
+
+## DAG tab
+
+`architecture.json` graphs **contexts/modules** ("kiến trúc rộng bao nhiêu"); it has no task dependency edges, so it can't answer "task nào chặn task nào" or "đường tới hạn ở đâu". The **DAG** tab answers that instead, from a separate `dag.json` payload — deliberately kept as its own standalone page (`dag.html`, embedded via iframe) rather than another toggle-able layer on the Architecture canvas, since the two graphs answer different questions and sharing one canvas is why the Architecture canvas already needs a layer toggle to stay readable.
+
+`dag.html` is a zero-dependency, vanilla JS + SVG page — open it directly (works via `file://` too, showing an empty embedded snapshot) or serve it alongside the other JSON files for a live view. It reads `dag.json` for:
+
+- **Edges** (`needs`, with an `unlocked` flag = has the upstream task reached `done`)
+- **`layer`** — longest-path layering (wave number); columns in the DAG are waves
+- **`stage`** — index 0-5 in the linear `todo → done` lifecycle; `blocked` is `-1` (a branch, not a stage) and renders as a red hatch instead of the 6-segment progress rail
+- **`history`** — first timestamp each task reached each status, driving the replay scrubber
+- **`ready`**, **`critical_path`** — precomputed server-side (critical path is weighted by *remaining* stages, so a nearly-done task doesn't count as "critical" just because its chain is long)
+
+Rows in the DAG are lanes: `context` if set, else `owner` — with G6 `module_boundary` on, that's the same file-ownership boundary the engine already enforces.
 
 ## Canvas và tương tác
 
@@ -25,3 +39,4 @@ Mở `http://localhost:8080/index.html`. `workflow.json` được thử đọc t
 - `impact.json`: kết quả `ai-kit --json context impact <module>` cho từng module trong `architecture.json`; danh sách module được đọc động, không hardcode.
 - `board.json`: workflow hiện tại qua `ai-kit board --format json`, kèm tags/files/acceptance_count.
 - `events.json`: 200 runtime events gần nhất từ `.ai-work/logs/events.jsonl`.
+- `dag.json`: task dependency graph (edges, layer/wave, stage, history, ready, critical_path) computed by `_generate_dag_payload()` from the current workflow state — see the "DAG tab" section above.
