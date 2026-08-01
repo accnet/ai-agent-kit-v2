@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 # Validate AI-Kit v2 skill contracts and content quality markers.
+#
+# Environment variable override for testing:
+#   CHECK_SKILLS_ROOT=/some/path  use this as the repo root instead of auto-detect
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+ROOT="${CHECK_SKILLS_ROOT:-$(cd "$(dirname "$0")/../.." && pwd)}"
 cd "$ROOT"
-
 mode="${1:-all}"
 fail=0
 

@@ -85,20 +85,29 @@ skill_triggers:
     technology_skills: ["ai/openai", "ai/llm-application"]
     reason: "Model integration requires provider handling plus security and performance guardrails."
 
+# ai_triggers: when a task carries one of these stack/domain tags, the listed
+# extra_domains are added to the role's normal domain set by skills-for.sh.
+# This keeps AI skills out of unrelated tasks while making them available
+# across all relevant roles when an AI/RAG concern is present.
+ai_triggers:
+  stacks: [openai, rag, llm, ai, embeddings, vector-store]
+  extra_domains: [ai]
+  roles: [architect, backend, integration, security, performance, qa]
+
 owners:
   planner: []
   researcher: []
-  architect: []
+  architect: [ai]
   backend: [backend, database, ai]
   frontend: [frontend]
   database: [database]
   devops: [devops]
-  qa: [testing]
+  qa: [testing, ai]
   reviewer: []
   document: []
   release: [devops]
-  security: []
-  integration: []
-  performance: []
+  security: [ai]
+  integration: [ai]
+  performance: [ai]
   router: []
   scheduler: []
