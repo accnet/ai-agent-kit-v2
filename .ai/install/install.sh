@@ -95,6 +95,11 @@ for index in "${!SOURCES[@]}"; do
 done
 
 if [[ "$DRY_RUN" -eq 0 ]]; then
+  if [[ -d "$TARGET/.visualizer" ]]; then
+    if ! python3 "$TARGET/.ai/engine/ai_kit.py" visualizer generate; then
+      echo "WARNING: unable to generate initial visualizer data" >&2
+    fi
+  fi
   ignore="$TARGET/.gitignore"
   marker="# AI-Kit runtime state"
   if ! [[ -f "$ignore" ]] || ! grep -qF "$marker" "$ignore"; then

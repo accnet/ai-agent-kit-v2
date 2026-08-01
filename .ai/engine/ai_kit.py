@@ -830,6 +830,18 @@ def _generate_visualizer_data(state_arg: str | Path | None = None) -> dict:
     if not VISUALIZER_DIR.exists():
         return {}
     state_path_value = state_path(str(state_arg) if state_arg is not None else None)
+    if not state_path_value.exists():
+        payloads = {
+            "board.json": {status: [] for status in STATUSES},
+            "architecture.json": _load_contexts(),
+            "impact.json": {},
+            "events.json": [],
+        }
+        for filename, payload in payloads.items():
+            (VISUALIZER_DIR / filename).write_text(
+                json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+            )
+        return payloads
     state = load(state_path_value)
     validate(state)
     board = {status: [] for status in STATUSES}
