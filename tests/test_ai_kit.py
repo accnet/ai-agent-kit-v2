@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -17,6 +18,7 @@ import unittest
 from pathlib import Path
 
 ENGINE_DIR = Path(__file__).resolve().parents[1] / ".ai" / "engine"
+REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ENGINE_DIR))
 import ai_kit  # noqa: E402
 
@@ -731,6 +733,89 @@ class CheckSkillsScriptTests(unittest.TestCase):
         result = self._run("all")
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("missing required field", result.stderr)
+
+
+class SkillMetadataTests(unittest.TestCase):
+    """Verify skill.meta.yaml exists and has correct content for all technology skills."""
+
+    SKILLS_ROOT = REPO_ROOT / ".ai" / "skills"
+    REQUIRED_FIELDS = ("name", "domain", "version", "owner", "reviewed_at",
+                       "documents", "entrypoint", "path")
+
+    def _tech_dirs(self) -> list[Path]:
+        dirs = []
+        for domain_dir in self.SKILLS_ROOT.iterdir():
+            if not domain_dir.is_dir() or domain_dir.name == "core":
+                continue
+            for tech_dir in domain_dir.iterdir():
+                if tech_dir.is_dir():
+                    dirs.append(tech_dir)
+        return sorted(dirs)
+
+    def test_all_tech_skills_have_meta(self) -> None:
+        missing = [d for d in self._tech_dirs() if not (d / "skill.meta.yaml").exists()]
+        self.assertEqual(missing, [], f"Missing skill.meta.yaml in: {missing}")
+
+    def test_meta_has_required_fields(self) -> None:
+        for tech_dir in self._tech_dirs():
+            meta = (tech_dir / "skill.meta.yaml").read_text(encoding="utf-8")
+            for field in self.REQUIRED_FIELDS:
+                self.assertIn(f"{field}:", meta,
+                              f"{tech_dir.relative_to(REPO_ROOT)}/skill.meta.yaml missing field '{field}'")
+
+    def test_reviewed_at_format(self) -> None:
+        pattern = re.compile(r"^reviewed_at:\s*['\"]?(\d{4}-\d{2}-\d{2})['\"]?", re.MULTILINE)
+        for tech_dir in self._tech_dirs():
+            meta = (tech_dir / "skill.meta.yaml").read_text(encoding="utf-8")
+            m = pattern.search(meta)
+            self.assertIsNotNone(m, f"{tech_dir.name}/skill.meta.yaml: reviewed_at missing or wrong format")
+
+    def test_domain_matches_directory(self) -> None:
+        for tech_dir in self._tech_dirs():
+            expected_domain = tech_dir.parent.name
+            meta = (tech_dir / "skill.meta.yaml").read_text(encoding="utf-8")
+            m = re.search(r"^domain:\s*['\"]?(\S+?)['\"]?\s*$", meta, re.MULTILINE)
+            self.assertIsNotNone(m, f"{tech_dir.name}: domain field not found")
+            self.assertEqual(m.group(1), expected_domain,
+                             f"{tech_dir.name}: domain '{m.group(1)}' != dir '{expected_domain}'")
+
+    def test_name_matches_directory(self) -> None:
+        for tech_dir in self._tech_dirs():
+            expected_name = tech_dir.name
+            meta = (tech_dir / "skill.meta.yaml").read_text(encoding="utf-8")
+            m = re.search(r"^name:\s*['\"]?(\S+?)['\"]?\s*$", meta, re.MULTILINE)
+            self.assertIsNotNone(m, f"{tech_dir.name}: name field not found")
+            self.assertEqual(m.group(1), expected_name,
+                             f"{tech_dir.name}: name '{m.group(1)}' != dir '{expected_name}'")
+
+
+class SkillContentTests(unittest.TestCase):
+    """Verify that technology skill documents contain no placeholder markers."""
+
+    SKILLS_ROOT = REPO_ROOT / ".ai" / "skills"
+    PLACEHOLDER_PATTERN = re.compile(r"PLACEHOLDER|not yet written|generic kit template", re.IGNORECASE)
+
+    def _tech_docs(self) -> list[Path]:
+        docs = []
+        for domain_dir in self.SKILLS_ROOT.iterdir():
+            if not domain_dir.is_dir() or domain_dir.name == "core":
+                continue
+            for tech_dir in domain_dir.iterdir():
+                if not tech_dir.is_dir():
+                    continue
+                for doc in ("overview", "patterns", "best-practices", "pitfalls", "examples"):
+                    path = tech_dir / f"{doc}.md"
+                    if path.exists():
+                        docs.append(path)
+        return sorted(docs)
+
+    def test_no_placeholder_in_skill_docs(self) -> None:
+        flagged = []
+        for path in self._tech_docs():
+            text = path.read_text(encoding="utf-8")
+            if self.PLACEHOLDER_PATTERN.search(text):
+                flagged.append(str(path.relative_to(REPO_ROOT)))
+        self.assertEqual(flagged, [], f"Placeholder content found in: {flagged}")
 
 
 if __name__ == "__main__":
