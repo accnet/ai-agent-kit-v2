@@ -1,5 +1,3 @@
-# openai Application Notes
+# OpenAI Integration Evidence
 
-> ⚠️ PLACEHOLDER — not yet written for openai. This file still holds the generic kit template below, with no openai-specific guidance. Do not treat it as real domain knowledge; replace it with actual openai patterns/pitfalls/examples before relying on it.
-
-Before implementation, identify one nearby project example with the same responsibility. Mirror its structure, naming, error policy, and test style. Record deviations and their rationale in the task review.
+Verification: a unit test mocks the OpenAI client and asserts the service returns a typed result; a test for the retry path confirms back-off on a mocked 429 response; `usage.total_tokens` is logged for each production call; structured output is validated against the declared JSON schema; no API key appears in committed files or logs.

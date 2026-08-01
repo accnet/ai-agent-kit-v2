@@ -1,5 +1,3 @@
-# kubernetes Patterns
+# Kubernetes Patterns
 
-> ⚠️ PLACEHOLDER — not yet written for kubernetes. This file still holds the generic kit template below, with no kubernetes-specific guidance. Do not treat it as real domain knowledge; replace it with actual kubernetes patterns/pitfalls/examples before relying on it.
-
-Keep boundaries explicit, use project-native configuration and error handling, and isolate external effects behind tested interfaces. Prefer small composable units over framework-wide changes for a scoped task.
+Declare all workloads as Deployments or StatefulSets with explicit `replicas`, `resources.requests`, and `resources.limits`. Define liveness and readiness probes for every container. Use ConfigMaps for non-sensitive configuration and Secrets (or an external secrets operator) for credentials. Namespace workloads by environment; never deploy directly to `default`. Use rolling updates with a defined `maxSurge`/`maxUnavailable` strategy. Apply RBAC with least-privilege: create dedicated ServiceAccounts and bind them to minimal Roles.

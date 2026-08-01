@@ -1,5 +1,3 @@
-# nginx Overview
+# Nginx
 
-> ⚠️ PLACEHOLDER — not yet written for nginx. This file still holds the generic kit template below, with no nginx-specific guidance. Do not treat it as real domain knowledge; replace it with actual nginx patterns/pitfalls/examples before relying on it.
-
-Use this reference when a task explicitly involves nginx in the devops domain. First inspect the project's existing nginx usage and versions; this kit supplies guardrails, not a replacement architecture.
+Use when a task modifies Nginx configuration, virtual hosts, upstream proxy settings, TLS termination, rate limiting, or static asset serving. Inspect the project's Nginx version (`nginx -v`), the role it plays (reverse proxy, API gateway, static file server), and existing `nginx.conf` structure before making changes.

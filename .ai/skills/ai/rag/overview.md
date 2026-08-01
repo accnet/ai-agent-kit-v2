@@ -1,5 +1,3 @@
-# rag Overview
+# Retrieval-Augmented Generation (RAG)
 
-> ⚠️ PLACEHOLDER — not yet written for rag. This file still holds the generic kit template below, with no rag-specific guidance. Do not treat it as real domain knowledge; replace it with actual rag patterns/pitfalls/examples before relying on it.
-
-Use this reference when a task explicitly involves rag in the ai domain. First inspect the project's existing rag usage and versions; this kit supplies guardrails, not a replacement architecture.
+Use when a task implements or modifies a pipeline that retrieves documents from a vector store or search index and injects them into a language model prompt. Inspect the project's embedding model, vector database (Pinecone, Qdrant, Weaviate, pgvector, Chroma), chunking strategy, and retrieval evaluation setup before making changes.

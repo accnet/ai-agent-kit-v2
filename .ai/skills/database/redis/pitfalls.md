@@ -1,5 +1,3 @@
-# redis Pitfalls
+# Redis Pitfalls
 
-> ⚠️ PLACEHOLDER — not yet written for redis. This file still holds the generic kit template below, with no redis-specific guidance. Do not treat it as real domain knowledge; replace it with actual redis patterns/pitfalls/examples before relying on it.
-
-Avoid introducing a parallel architecture, bypassing validation, silently swallowing errors, broad dependency upgrades, or copying snippets that conflict with the current project version.
+Do not use Redis as a primary durable data store without explicit persistence configuration and a backup strategy. Do not store large blobs (>1 MB) in Redis; it degrades throughput for all clients sharing the instance. Do not use KEYS/SMEMBERS on production with millions of entries; prefer SCAN with a cursor. Do not ignore connection pool exhaustion; set pool size and timeout explicitly. Do not rely on key expiration for security-critical invalidation — clients may hold stale data for up to the TTL.

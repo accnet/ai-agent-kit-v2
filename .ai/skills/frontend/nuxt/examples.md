@@ -1,5 +1,3 @@
-# nuxt Application Notes
+# Nuxt Evidence
 
-> ⚠️ PLACEHOLDER — not yet written for nuxt. This file still holds the generic kit template below, with no nuxt-specific guidance. Do not treat it as real domain knowledge; replace it with actual nuxt patterns/pitfalls/examples before relying on it.
-
-Before implementation, identify one nearby project example with the same responsibility. Mirror its structure, naming, error policy, and test style. Record deviations and their rationale in the task review.
+Verification: `nuxt build` exits 0, `nuxt typecheck` reports no errors, a server-side rendered page returns correct HTML in `curl` (not just a loader shell), a Vitest component test asserts rendered output, and a Playwright smoke test navigates two routes without hydration errors in the console.

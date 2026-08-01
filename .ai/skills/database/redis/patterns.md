@@ -1,5 +1,3 @@
-# redis Patterns
+# Redis Patterns
 
-> ⚠️ PLACEHOLDER — not yet written for redis. This file still holds the generic kit template below, with no redis-specific guidance. Do not treat it as real domain knowledge; replace it with actual redis patterns/pitfalls/examples before relying on it.
-
-Keep boundaries explicit, use project-native configuration and error handling, and isolate external effects behind tested interfaces. Prefer small composable units over framework-wide changes for a scoped task.
+Organise keys with a consistent namespace prefix (e.g. `app:user:session:<id>`). Set an explicit TTL on every cache key; avoid keys that never expire. Use atomic operations (INCR, SETNX, MULTI/EXEC, Lua scripts) for counters and distributed locks. Use Redis Streams or Pub/Sub for event fan-out, not as a durable message queue unless persistence is enabled. For distributed locking prefer the Redlock algorithm or a dedicated library over plain SETNX. Separate databases or namespaces for cache, session, and queue data.

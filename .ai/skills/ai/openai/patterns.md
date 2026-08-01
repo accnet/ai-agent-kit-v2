@@ -1,5 +1,3 @@
-# openai Patterns
+# OpenAI Integration Patterns
 
-> ⚠️ PLACEHOLDER — not yet written for openai. This file still holds the generic kit template below, with no openai-specific guidance. Do not treat it as real domain knowledge; replace it with actual openai patterns/pitfalls/examples before relying on it.
-
-Keep boundaries explicit, use project-native configuration and error handling, and isolate external effects behind tested interfaces. Prefer small composable units over framework-wide changes for a scoped task.
+Encapsulate all OpenAI API calls in a dedicated service or adapter class; do not scatter `client.chat.completions.create()` calls across the codebase. Use structured output (`response_format: {type: "json_schema", json_schema: {...}}`) when the downstream code parses the model's response — avoid free-form JSON parsing with string matching. For tool/function calling, define a typed schema for each tool and validate the returned tool arguments before execution. Implement exponential backoff with jitter for rate-limit (429) and transient server errors (5xx). Stream responses with `stream: true` only when the UX requires incremental output; use non-streaming for structured output to simplify parsing. Manage token budget explicitly: count tokens with `tiktoken` (or the API's usage field) and truncate or summarise context before the model's context limit.

@@ -1,9 +1,3 @@
-# vue Best Practices
+# Vue Best Practices
 
-> ⚠️ PLACEHOLDER — not yet written for vue. This file still holds the generic kit template below, with no vue-specific guidance. Do not treat it as real domain knowledge; replace it with actual vue patterns/pitfalls/examples before relying on it.
-
-- Follow pinned project versions and existing conventions.
-- Validate untrusted input at boundaries.
-- Keep secrets in environment-backed configuration, never source files.
-- Add focused tests for changed behavior.
-- Make operational impact observable where applicable.
+Enable strict TypeScript in the project (Volar + `vue-tsc`). Use `v-bind` shorthand (`:`) and `v-on` shorthand (`@`). Always provide a `key` attribute on `v-for` elements. Avoid accessing DOM directly; use template refs (`ref()`) when direct manipulation is necessary. Test components with Vitest + `@vue/test-utils`; test stores independently. Lazy-load route components with `defineAsyncComponent` or `import()` in the router to reduce the initial bundle. Use `watch` with `{ immediate: false }` by default and only enable `immediate` when the initial run is required.

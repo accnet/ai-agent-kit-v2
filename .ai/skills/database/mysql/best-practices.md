@@ -1,9 +1,3 @@
-# mysql Best Practices
+# MySQL Best Practices
 
-> ⚠️ PLACEHOLDER — not yet written for mysql. This file still holds the generic kit template below, with no mysql-specific guidance. Do not treat it as real domain knowledge; replace it with actual mysql patterns/pitfalls/examples before relying on it.
-
-- Follow pinned project versions and existing conventions.
-- Validate untrusted input at boundaries.
-- Keep secrets in environment-backed configuration, never source files.
-- Add focused tests for changed behavior.
-- Make operational impact observable where applicable.
+Always use parameterised queries; never interpolate user input into SQL. Run `EXPLAIN` on new queries before merging and verify the access type is `ref` or better for indexed lookups. Set `sql_mode` to `STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION`. Configure `innodb_buffer_pool_size` to ~70 % of available RAM for dedicated database hosts. Enable binary logging for point-in-time recovery. Take regular full backups (mysqldump or Percona XtraBackup) and verify restore works. Never store plain-text passwords; hash with bcrypt or Argon2 at the application layer.

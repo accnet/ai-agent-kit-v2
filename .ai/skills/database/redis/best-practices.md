@@ -1,9 +1,3 @@
-# redis Best Practices
+# Redis Best Practices
 
-> ⚠️ PLACEHOLDER — not yet written for redis. This file still holds the generic kit template below, with no redis-specific guidance. Do not treat it as real domain knowledge; replace it with actual redis patterns/pitfalls/examples before relying on it.
-
-- Follow pinned project versions and existing conventions.
-- Validate untrusted input at boundaries.
-- Keep secrets in environment-backed configuration, never source files.
-- Add focused tests for changed behavior.
-- Make operational impact observable where applicable.
+Configure `maxmemory` and a suitable eviction policy (`allkeys-lru` for pure cache, `volatile-lru` if some keys must survive eviction). Enable persistence (RDB snapshots + AOF) for session and queue data; disable persistence for pure ephemeral caches to maximise throughput. Use Redis Sentinel or Redis Cluster for high availability in production. Authenticate with `requirepass` / ACL users and restrict bind addresses. Monitor memory usage, hit/miss ratio, and eviction events. Instrument client-side with a metrics library (Prometheus redis_exporter or equivalent). Use pipelining for batched reads; avoid N+1 round trips.

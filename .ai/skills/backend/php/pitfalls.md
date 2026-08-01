@@ -1,5 +1,3 @@
-# php Pitfalls
+# PHP Backend Pitfalls
 
-> ⚠️ PLACEHOLDER — not yet written for php. This file still holds the generic kit template below, with no php-specific guidance. Do not treat it as real domain knowledge; replace it with actual php patterns/pitfalls/examples before relying on it.
-
-Avoid introducing a parallel architecture, bypassing validation, silently swallowing errors, broad dependency upgrades, or copying snippets that conflict with the current project version.
+Do not concatenate user input into SQL queries; always use prepared statements or the ORM query builder. Do not suppress errors with `@`; fix root causes. Do not store secrets in code or committed `.env` files. Avoid `eval()` and `exec()` with untrusted input. Do not bypass type declarations by suppressing or ignoring type errors. Do not use `die()`/`exit()` for error flow in library code; throw exceptions. Avoid global mutable state and static side effects that make unit testing impossible. Do not import packages that update `composer.lock` with unchecked version ranges — pin or range-lock all direct dependencies.

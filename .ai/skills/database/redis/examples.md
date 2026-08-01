@@ -1,5 +1,3 @@
-# redis Application Notes
+# Redis Evidence
 
-> ⚠️ PLACEHOLDER — not yet written for redis. This file still holds the generic kit template below, with no redis-specific guidance. Do not treat it as real domain knowledge; replace it with actual redis patterns/pitfalls/examples before relying on it.
-
-Before implementation, identify one nearby project example with the same responsibility. Mirror its structure, naming, error policy, and test style. Record deviations and their rationale in the task review.
+Verification: integration test sets a key with TTL and reads it back before expiry; after TTL elapses the key is absent; a lock acquisition test confirms only one concurrent caller holds the lock; `redis-cli INFO memory` shows `used_memory_human` is within configured `maxmemory`.

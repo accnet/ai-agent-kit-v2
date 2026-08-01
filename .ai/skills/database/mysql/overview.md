@@ -1,5 +1,3 @@
-# mysql Overview
+# MySQL
 
-> ⚠️ PLACEHOLDER — not yet written for mysql. This file still holds the generic kit template below, with no mysql-specific guidance. Do not treat it as real domain knowledge; replace it with actual mysql patterns/pitfalls/examples before relying on it.
-
-Use this reference when a task explicitly involves mysql in the database domain. First inspect the project's existing mysql usage and versions; this kit supplies guardrails, not a replacement architecture.
+Use when a task creates or modifies MySQL schemas, queries, indexes, stored procedures, or MySQL-specific connection settings. Inspect the project's pinned MySQL version (`SHOW VARIABLES LIKE 'version'`), the ORM/query builder in use, and the migration tooling before making schema changes.

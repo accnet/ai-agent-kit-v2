@@ -1,5 +1,3 @@
-# kubernetes Pitfalls
+# Kubernetes Pitfalls
 
-> ⚠️ PLACEHOLDER — not yet written for kubernetes. This file still holds the generic kit template below, with no kubernetes-specific guidance. Do not treat it as real domain knowledge; replace it with actual kubernetes patterns/pitfalls/examples before relying on it.
-
-Avoid introducing a parallel architecture, bypassing validation, silently swallowing errors, broad dependency upgrades, or copying snippets that conflict with the current project version.
+Do not run containers as root unless the workload explicitly requires it; use `securityContext.runAsNonRoot: true`. Do not use `hostNetwork` or `hostPID` without a documented security justification. Do not allow pods to mount the Docker socket. Do not set CPU limits aggressively low — CPU throttling causes latency spikes without OOM kills. Do not use `kubectl edit` on production workloads; all changes must go through version-controlled manifests and CI. Do not store sensitive values in ConfigMaps; use Secrets and restrict access with RBAC.

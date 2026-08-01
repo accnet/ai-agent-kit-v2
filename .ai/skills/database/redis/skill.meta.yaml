@@ -1,0 +1,7 @@
+skill_name: Redis
+domain: database
+technology: redis
+owner: database
+version: "1.0"
+reviewed_at: "2026-08-01"
+supported_stack: [redis, cache, queue, session]

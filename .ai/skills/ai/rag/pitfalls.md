@@ -1,5 +1,3 @@
-# rag Pitfalls
+# RAG Pitfalls
 
-> ⚠️ PLACEHOLDER — not yet written for rag. This file still holds the generic kit template below, with no rag-specific guidance. Do not treat it as real domain knowledge; replace it with actual rag patterns/pitfalls/examples before relying on it.
-
-Avoid introducing a parallel architecture, bypassing validation, silently swallowing errors, broad dependency upgrades, or copying snippets that conflict with the current project version.
+Do not inject unchecked retrieved chunks directly into prompts — a malicious document can redirect model behaviour (indirect prompt injection). Do not use overlapping chunks without tracking which source document a chunk belongs to, or citations will be wrong. Do not use a static `top_k` for all query types; tune per query category based on measured recall. Do not skip re-embedding after an embedding model upgrade — stale embeddings produce silently degraded results. Do not store sensitive personal data in the vector index without encryption and access-control policies. Do not ignore chunk boundary artefacts (split sentences, cut tables); review chunked output visually during pipeline development.

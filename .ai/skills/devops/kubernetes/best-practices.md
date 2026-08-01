@@ -1,9 +1,3 @@
-# kubernetes Best Practices
+# Kubernetes Best Practices
 
-> ⚠️ PLACEHOLDER — not yet written for kubernetes. This file still holds the generic kit template below, with no kubernetes-specific guidance. Do not treat it as real domain knowledge; replace it with actual kubernetes patterns/pitfalls/examples before relying on it.
-
-- Follow pinned project versions and existing conventions.
-- Validate untrusted input at boundaries.
-- Keep secrets in environment-backed configuration, never source files.
-- Add focused tests for changed behavior.
-- Make operational impact observable where applicable.
+Set both `requests` and `limits` for CPU and memory on every container; omitting `requests` breaks scheduling guarantees. Use `PodDisruptionBudgets` for workloads that must maintain availability during node drains. Validate manifests with `kubectl apply --dry-run=server` before applying. Pin container images to a specific digest or tag; avoid `latest`. Use Network Policies to restrict pod-to-pod traffic. Enable audit logging and monitor it. Apply resource quotas and limit ranges per namespace to prevent resource exhaustion. Store secrets in a vault (HashiCorp Vault, AWS Secrets Manager, Sealed Secrets); do not commit plain Kubernetes Secret manifests with real values.

@@ -1,0 +1,7 @@
+skill_name: Retrieval-Augmented Generation
+domain: ai
+technology: rag
+owner: backend
+version: "1.0"
+reviewed_at: "2026-08-01"
+supported_stack: [rag, retrieval, embeddings, vector, llm, ai]

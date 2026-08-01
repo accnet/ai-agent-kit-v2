@@ -1,5 +1,3 @@
-# vue Patterns
+# Vue Patterns
 
-> ⚠️ PLACEHOLDER — not yet written for vue. This file still holds the generic kit template below, with no vue-specific guidance. Do not treat it as real domain knowledge; replace it with actual vue patterns/pitfalls/examples before relying on it.
-
-Keep boundaries explicit, use project-native configuration and error handling, and isolate external effects behind tested interfaces. Prefer small composable units over framework-wide changes for a scoped task.
+Prefer the Composition API (`<script setup>`) for new components in Vue 3 projects. Extract reusable reactive logic into composables under `composables/`. Use Pinia stores for shared application state; keep component-local state in `ref`/`reactive`. Define props with TypeScript types and emit events with `defineEmits` for type safety. Keep components focused — split presentation from data-fetching logic. Use Vue Router navigation guards for authentication; avoid checking auth inside component setup.

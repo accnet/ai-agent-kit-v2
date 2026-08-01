@@ -1,0 +1,7 @@
+skill_name: NestJS Core
+domain: backend
+technology: nestjs-core
+owner: backend
+version: "1.0"
+reviewed_at: "2026-08-01"
+supported_stack: [nestjs, nodejs]

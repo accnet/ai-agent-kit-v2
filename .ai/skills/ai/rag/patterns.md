@@ -1,5 +1,3 @@
-# rag Patterns
+# RAG Patterns
 
-> ⚠️ PLACEHOLDER — not yet written for rag. This file still holds the generic kit template below, with no rag-specific guidance. Do not treat it as real domain knowledge; replace it with actual rag patterns/pitfalls/examples before relying on it.
-
-Keep boundaries explicit, use project-native configuration and error handling, and isolate external effects behind tested interfaces. Prefer small composable units over framework-wide changes for a scoped task.
+Split the pipeline into discrete stages: ingest → chunk → embed → index → retrieve → rerank → generate. Use fixed-size sliding-window chunking with overlap for dense text; use semantic/sentence-aware chunking for structured documents. Store document metadata (source, section, last-modified, access-control tags) alongside embeddings and filter on metadata before or after retrieval. Retrieve more candidates than needed (e.g. top-20) then rerank with a cross-encoder or LLM-as-judge before passing the top-k to the model. Cite sources in the generated response; include document ID and chunk offset so the reference can be verified. Use a dedicated embedding model version (e.g. `text-embedding-3-small`) pinned in config and re-embed the corpus when upgrading the model.

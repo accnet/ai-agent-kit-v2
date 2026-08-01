@@ -1,5 +1,3 @@
-# mysql Pitfalls
+# MySQL Pitfalls
 
-> ⚠️ PLACEHOLDER — not yet written for mysql. This file still holds the generic kit template below, with no mysql-specific guidance. Do not treat it as real domain knowledge; replace it with actual mysql patterns/pitfalls/examples before relying on it.
-
-Avoid introducing a parallel architecture, bypassing validation, silently swallowing errors, broad dependency upgrades, or copying snippets that conflict with the current project version.
+Do not use `SELECT *` in application queries; name columns explicitly. Do not run DDL inside a transaction that also performs DML — MySQL auto-commits DDL. Do not use `ENUM` for values that may change; use a lookup table instead. Avoid `DATETIME` with implicit time zones; use `DATETIME` + explicit UTC application convention or `TIMESTAMP` with awareness of the 2038 limit. Do not create full-table scans on million-row tables; add composite indexes and profile with slow-query log. Do not disable foreign key checks permanently (`SET FOREIGN_KEY_CHECKS=0`) outside controlled migration windows.

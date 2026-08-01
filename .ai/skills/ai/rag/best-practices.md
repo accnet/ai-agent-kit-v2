@@ -1,9 +1,3 @@
-# rag Best Practices
+# RAG Best Practices
 
-> ⚠️ PLACEHOLDER — not yet written for rag. This file still holds the generic kit template below, with no rag-specific guidance. Do not treat it as real domain knowledge; replace it with actual rag patterns/pitfalls/examples before relying on it.
-
-- Follow pinned project versions and existing conventions.
-- Validate untrusted input at boundaries.
-- Keep secrets in environment-backed configuration, never source files.
-- Add focused tests for changed behavior.
-- Make operational impact observable where applicable.
+Measure retrieval quality separately from generation quality: track recall@k and MRR for retrieval, and answer faithfulness/groundedness for generation. Set a similarity threshold for retrieval; return "no relevant documents found" rather than hallucinating when no document passes the threshold. Sanitise retrieved content before injecting into prompts — treat it as untrusted input to defend against prompt injection in stored documents. Apply access-control filtering at the retrieval layer, not only at the UI layer; users must never receive chunks they are not authorised to see. Keep an offline copy of the corpus for re-indexing; implement incremental updates to avoid full re-embedding on every document change. Test the pipeline end-to-end with a golden-set of question/answer/source triples.

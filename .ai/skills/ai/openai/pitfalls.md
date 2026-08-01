@@ -1,5 +1,3 @@
-# openai Pitfalls
+# OpenAI Integration Pitfalls
 
-> ⚠️ PLACEHOLDER — not yet written for openai. This file still holds the generic kit template below, with no openai-specific guidance. Do not treat it as real domain knowledge; replace it with actual openai patterns/pitfalls/examples before relying on it.
-
-Avoid introducing a parallel architecture, bypassing validation, silently swallowing errors, broad dependency upgrades, or copying snippets that conflict with the current project version.
+Do not trust model output as safe input for SQL queries, shell commands, or HTML rendering without validation and sanitisation — prompt injection is a real attack vector. Do not swallow `openai.APIError` exceptions silently; surface them as structured errors with the request ID. Do not call the API synchronously from a synchronous web worker thread without a timeout; enforce a hard deadline. Do not use `max_tokens` values far below what the model needs to complete a response — it silently truncates output, which breaks JSON parsing. Do not log raw prompts containing PII in plaintext log sinks. Do not assume a model update (e.g. gpt-4o → gpt-4o-2024-11-20) has identical output behaviour; test before upgrading.

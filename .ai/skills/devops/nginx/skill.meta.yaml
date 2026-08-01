@@ -1,0 +1,7 @@
+skill_name: Nginx
+domain: devops
+technology: nginx
+owner: devops
+version: "1.0"
+reviewed_at: "2026-08-01"
+supported_stack: [nginx, proxy, web-server]

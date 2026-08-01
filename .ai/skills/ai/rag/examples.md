@@ -1,5 +1,3 @@
-# rag Application Notes
+# RAG Evidence
 
-> ⚠️ PLACEHOLDER — not yet written for rag. This file still holds the generic kit template below, with no rag-specific guidance. Do not treat it as real domain knowledge; replace it with actual rag patterns/pitfalls/examples before relying on it.
-
-Before implementation, identify one nearby project example with the same responsibility. Mirror its structure, naming, error policy, and test style. Record deviations and their rationale in the task review.
+Verification: ingestion script processes a known document corpus and all chunks land in the index; a retrieval test with a known query returns the expected source document in the top-k; an end-to-end test with a golden Q&A pair produces an answer that cites the correct source; access-control test confirms a restricted document is not returned for an unauthorised user query.

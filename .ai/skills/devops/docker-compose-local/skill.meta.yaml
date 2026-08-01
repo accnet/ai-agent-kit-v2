@@ -1,0 +1,7 @@
+skill_name: Docker Compose Local
+domain: devops
+technology: docker-compose-local
+owner: devops
+version: "1.0"
+reviewed_at: "2026-08-01"
+supported_stack: [docker, compose, local, dev]

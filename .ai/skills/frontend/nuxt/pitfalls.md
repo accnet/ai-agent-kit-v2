@@ -1,5 +1,3 @@
-# nuxt Pitfalls
+# Nuxt Pitfalls
 
-> ⚠️ PLACEHOLDER — not yet written for nuxt. This file still holds the generic kit template below, with no nuxt-specific guidance. Do not treat it as real domain knowledge; replace it with actual nuxt patterns/pitfalls/examples before relying on it.
-
-Avoid introducing a parallel architecture, bypassing validation, silently swallowing errors, broad dependency upgrades, or copying snippets that conflict with the current project version.
+Do not access `window` or `document` at module level — they are undefined during SSR; guard with `if (process.client)` or `onMounted`. Do not store sensitive values in `publicRuntimeConfig` / `runtimeConfig.public` — they are exposed to the browser. Do not mutate `useRoute()` state directly; use `navigateTo()` for navigation. Avoid blocking `useAsyncData` with heavyweight server calls on every request for pages that could use SSG or ISR. Do not register plugins that have side effects on both client and server without a guard (`process.server` / `process.client`).

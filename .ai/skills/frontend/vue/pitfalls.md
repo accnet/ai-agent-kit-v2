@@ -1,5 +1,3 @@
-# vue Pitfalls
+# Vue Pitfalls
 
-> ⚠️ PLACEHOLDER — not yet written for vue. This file still holds the generic kit template below, with no vue-specific guidance. Do not treat it as real domain knowledge; replace it with actual vue patterns/pitfalls/examples before relying on it.
-
-Avoid introducing a parallel architecture, bypassing validation, silently swallowing errors, broad dependency upgrades, or copying snippets that conflict with the current project version.
+Do not mutate props directly — use `emit` to propagate changes to the parent. Do not use `v-if` and `v-for` on the same element; wrap with a `<template>` or use a computed property. Avoid deep watchers on large objects; prefer specific property watchers. Do not use `this.$nextTick` or Options API patterns in Composition API components — use `nextTick` from `vue`. Do not store non-reactive plain objects in Pinia stores and expect reactivity; use `ref()` or `reactive()` inside `defineStore`.

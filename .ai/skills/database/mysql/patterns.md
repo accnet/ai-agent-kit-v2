@@ -1,5 +1,3 @@
-# mysql Patterns
+# MySQL Patterns
 
-> ⚠️ PLACEHOLDER — not yet written for mysql. This file still holds the generic kit template below, with no mysql-specific guidance. Do not treat it as real domain knowledge; replace it with actual mysql patterns/pitfalls/examples before relying on it.
-
-Keep boundaries explicit, use project-native configuration and error handling, and isolate external effects behind tested interfaces. Prefer small composable units over framework-wide changes for a scoped task.
+Express schema changes through versioned migration files (Flyway, Liquibase, Laravel migrations, or Knex); never apply ad-hoc DDL directly to production. Use InnoDB as the storage engine and UTF8MB4 character set for all tables. Prefer surrogate integer or UUID primary keys; add explicit indexes for every foreign key and every column that appears in a WHERE clause for large tables. Paginate with keyset (seek) pagination rather than OFFSET for large result sets. Wrap related mutations in a single transaction; keep transactions short.

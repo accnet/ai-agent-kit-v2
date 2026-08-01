@@ -1,0 +1,7 @@
+skill_name: Kubernetes
+domain: devops
+technology: kubernetes
+owner: devops
+version: "1.0"
+reviewed_at: "2026-08-01"
+supported_stack: [kubernetes, k8s, helm, kustomize]

@@ -1,5 +1,3 @@
-# nginx Application Notes
+# Nginx Evidence
 
-> ⚠️ PLACEHOLDER — not yet written for nginx. This file still holds the generic kit template below, with no nginx-specific guidance. Do not treat it as real domain knowledge; replace it with actual nginx patterns/pitfalls/examples before relying on it.
-
-Before implementation, identify one nearby project example with the same responsibility. Mirror its structure, naming, error policy, and test style. Record deviations and their rationale in the task review.
+Verification: `nginx -t` exits 0, `curl -I https://<host>` returns 200 with HSTS and security headers, `curl http://<host>` redirects to HTTPS (301), a request exceeding the rate limit returns 429, and `testssl.sh <host>` shows no critical findings.
