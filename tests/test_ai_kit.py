@@ -9,12 +9,16 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
+import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
 
 ENGINE_DIR = Path(__file__).resolve().parents[1] / ".ai" / "engine"
+REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ENGINE_DIR))
 import ai_kit  # noqa: E402
 
@@ -450,6 +454,368 @@ class DagPayloadTests(EngineTestCase):
         by_id = {t["id"]: t for t in dag["tasks"]}
         self.assertEqual(by_id["T3"]["layer"], 2)
         self.assertEqual(dag["waves"], 3)
+
+
+class RoutingAndSkillMetadataTests(EngineTestCase):
+    def _write_skill(self, relative: str) -> None:
+        skill_dir = self.root / relative
+        skill_dir.mkdir(parents=True, exist_ok=True)
+        docs = {
+            "overview.md": "# Overview\n",
+            "patterns.md": "# Patterns\n",
+            "best-practices.md": "# Best\n",
+            "pitfalls.md": "# Pitfalls\n",
+            "examples.md": "# Examples\n",
+        }
+        for name, body in docs.items():
+            (skill_dir / name).write_text(body, encoding="utf-8")
+        (skill_dir / "skill.meta.yaml").write_text(
+            "\n".join(
+                [
+                    f"name: {skill_dir.name}",
+                    f"domain: {skill_dir.parent.name}",
+                    "version: 1.0.0",
+                    "status: active",
+                    "owner: backend",
+                    "reviewed_at: 2026-08-01",
+                    "reviewers: [reviewer, backend]",
+                    "depends_on: []",
+                    "triggers: []",
+                    "documents: [overview.md, patterns.md, best-practices.md, pitfalls.md, examples.md]",
+                    "deprecated: false",
+                    f"entrypoint: {relative}/overview.md",
+                    f"path: {relative}",
+                ]
+            ) + "\n",
+            encoding="utf-8",
+        )
+
+    def _write_core_skill(self, name: str) -> None:
+        core_path = self.root / ".ai" / "skills" / "core" / name
+        core_path.mkdir(parents=True, exist_ok=True)
+        (core_path / "SKILL.md").write_text(
+            "\n".join(
+                [
+                    "---",
+                    f"name: {name}",
+                    "description: test core skill",
+                    "version: 1.0.0",
+                    "tier: core",
+                    "stack: [any]",
+                    "owner: reviewer",
+                    "gates: [G2]",
+                    "related: []",
+                    "---",
+                    "",
+                    f"# Skill: {name}",
+                    "",
+                    "## Purpose",
+                    "test",
+                ]
+            ) + "\n",
+            encoding="utf-8",
+        )
+
+    def setUp(self) -> None:
+        super().setUp()
+        for core_name in [
+            "skill-router",
+            "api-contract",
+            "observability",
+            "threat-modeling",
+            "security-review",
+            "performance-profiling",
+            "test-and-validation",
+            "e2e-testing",
+            "integration-contracts",
+            "contract-testing",
+            "webhooks-and-retries",
+            "architecture-decisions",
+        ]:
+            self._write_core_skill(core_name)
+        for rel in [
+            ".ai/skills/ai/openai",
+            ".ai/skills/ai/llm-application",
+            ".ai/skills/ai/ai-safety",
+            ".ai/skills/ai/rag",
+            ".ai/skills/ai/embeddings",
+            ".ai/skills/ai/vector-search",
+            ".ai/skills/ai/model-evaluation",
+            ".ai/skills/database/pgvector",
+            ".ai/skills/database/qdrant",
+            ".ai/skills/frontend/vue",
+        ]:
+            self._write_skill(rel)
+
+        (self.root / ".ai-config" / "kit.yaml").write_text(
+            "project:\n  stack: [rag, pgvector]\n", encoding="utf-8"
+        )
+        (self.root / ".ai-config" / "registry.yaml").write_text(
+            "\n".join(
+                [
+                    "owners:",
+                    "  backend: [backend, database, ai]",
+                    "skill_triggers:",
+                    "  prompt-injection:",
+                    "    match: [\"prompt injection\"]",
+                    "    core_skills: [\"threat-modeling\", \"security-review\"]",
+                    "    technology_skills: [\"ai/ai-safety\"]",
+                    "    reason: \"Prompt attack risk\"",
+                    "  rag-retrieval:",
+                    "    match: [\"rag\", \"retrieval\"]",
+                    "    core_skills: []",
+                    "    technology_skills: [\"ai/rag\", \"ai/embeddings\", \"ai/vector-search\", \"ai/model-evaluation\"]",
+                    "    reason: \"RAG path\"",
+                    "  llm-model:",
+                    "    match: [\"llm\"]",
+                    "    core_skills: [\"performance-profiling\", \"observability\"]",
+                    "    technology_skills: [\"ai/openai\", \"ai/llm-application\"]",
+                    "    reason: \"LLM path\"",
+                ]
+            ) + "\n",
+            encoding="utf-8",
+        )
+
+    def test_route_trigger_selection_and_structured_documents(self) -> None:
+        self.init_workflow()
+        self.add_task(
+            "T1",
+            owner="backend",
+            tags=["rag", "pgvector", "llm"],
+            acceptance=["Handle prompt injection safely"],
+            files=["src/retrieval.py"],
+        )
+        state = ai_kit.cmd_route(ns(state=str(self.state_file), id="T1", explain=True))
+        self.assertIn("skills", state)
+        self.assertIn("skill_details", state)
+        self.assertIn("trigger_matches", state)
+        self.assertIn("explain", state)
+        entries = {item["name"]: item for item in state["skill_details"]}
+        self.assertIn("ai/ai-safety", entries)
+        self.assertIn("ai/rag", entries)
+        self.assertIn("database/pgvector", entries)
+        self.assertIn("threat-modeling", entries)
+        self.assertIn("security-review", entries)
+        self.assertEqual(entries["ai/rag"]["documents"][0], ".ai/skills/ai/rag/overview.md")
+        orders = [item["loading_order"] for item in state["skill_details"]]
+        self.assertEqual(orders, sorted(orders))
+        trigger_ids = {item["id"] for item in state["trigger_matches"]}
+        self.assertTrue({"prompt-injection", "rag-retrieval", "llm-model"} <= trigger_ids)
+
+    def test_route_excludes_unrelated_ai_skills_when_no_trigger(self) -> None:
+        self.init_workflow()
+        self.add_task("T2", owner="backend", tags=["mysql"], acceptance=["schema update"], files=["db/schema.sql"])
+        payload = ai_kit.cmd_route(ns(state=str(self.state_file), id="T2", explain=False))
+        names = {item["name"] for item in payload["skill_details"]}
+        self.assertIn("api-contract", names)
+        self.assertNotIn("ai/ai-safety", names)
+        self.assertNotIn("database/qdrant", names)
+
+    def test_handoff_payload_contains_selected_skills(self) -> None:
+        self.init_workflow()
+        task = self.add_task("T3", owner="backend", tags=["llm"], acceptance=["safe output"])
+        route_payload = ai_kit.cmd_route(ns(state=str(self.state_file), id="T3", explain=False))
+        handoff = ai_kit._write_task_handoff(
+            task=task,
+            route_payload=route_payload,
+            state_arg=str(self.state_file),
+            runner_name="dummy",
+            runner={"provider": "test"},
+            model="test-model",
+            agent_id="agent1",
+        )
+        data = json.loads(Path(handoff).read_text(encoding="utf-8"))
+        self.assertIn("routing", data)
+        self.assertIn("skills", data["routing"])
+        self.assertIn("skill_details", data["routing"])
+        selected_names = {item["name"] for item in data["routing"]["skill_details"]}
+        self.assertTrue({"ai/openai", "ai/llm-application"} & selected_names)
+
+
+class CheckSkillsScriptTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name)
+        scripts = self.root / ".ai" / "scripts"
+        scripts.mkdir(parents=True, exist_ok=True)
+        source = Path(__file__).resolve().parents[1] / ".ai" / "scripts" / "check-skills.sh"
+        shutil.copy2(source, scripts / "check-skills.sh")
+        self.script = scripts / "check-skills.sh"
+        self._mk_core("skill-router")
+        self._mk_core("threat-modeling")
+        self._mk_core("security-review")
+        self._mk_core("performance-profiling")
+        self._mk_core("observability")
+        self._mk_core("test-and-validation")
+        self._mk_core("e2e-testing")
+        self._mk_core("integration-contracts")
+        self._mk_core("contract-testing")
+        self._mk_core("webhooks-and-retries")
+        self._mk_core("architecture-decisions")
+        self._mk_tech("ai", "openai")
+        self._mk_tech("backend", "python")
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def _mk_core(self, name: str, malformed: bool = False) -> None:
+        path = self.root / ".ai" / "skills" / "core" / name
+        path.mkdir(parents=True, exist_ok=True)
+        if malformed:
+            text = "---\nname: bad\n---\n"
+        else:
+            text = (
+                "---\n"
+                f"name: {name}\n"
+                "description: test\n"
+                "version: 1.0.0\n"
+                "tier: core\n"
+                "stack: [any]\n"
+                "owner: reviewer\n"
+                "gates: [G2]\n"
+                "related: []\n"
+                "---\n\n"
+                f"# Skill: {name}\n"
+            )
+        (path / "SKILL.md").write_text(text, encoding="utf-8")
+
+    def _mk_tech(self, domain: str, name: str, placeholder: bool = False, broken_meta: bool = False) -> None:
+        path = self.root / ".ai" / "skills" / domain / name
+        path.mkdir(parents=True, exist_ok=True)
+        body = "PLACEHOLDER text\n" if placeholder else "# content\n"
+        for doc in ["overview.md", "patterns.md", "best-practices.md", "pitfalls.md", "examples.md"]:
+            (path / doc).write_text(body, encoding="utf-8")
+        if broken_meta:
+            meta = "name: bad\n"
+        else:
+            meta = (
+                f"name: {name}\n"
+                f"domain: {domain}\n"
+                "version: 1.0.0\n"
+                "status: active\n"
+                "owner: backend\n"
+                "reviewed_at: 2026-08-01\n"
+                "reviewers: [reviewer]\n"
+                "depends_on: []\n"
+                "triggers: []\n"
+                "documents: [overview.md, patterns.md, best-practices.md, pitfalls.md, examples.md]\n"
+                "deprecated: false\n"
+                f"entrypoint: .ai/skills/{domain}/{name}/overview.md\n"
+                f"path: .ai/skills/{domain}/{name}\n"
+            )
+        (path / "skill.meta.yaml").write_text(meta, encoding="utf-8")
+
+    def _run(self, mode: str | None = None) -> subprocess.CompletedProcess:
+        cmd = ["bash", str(self.script)]
+        if mode:
+            cmd.append(mode)
+        return subprocess.run(cmd, cwd=self.root, capture_output=True, text=True)
+
+    def test_default_mode_is_all_and_detects_placeholder(self) -> None:
+        self._mk_tech("database", "redis", placeholder=True)
+        result = self._run()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("contains placeholder markers", result.stderr)
+
+    def test_ai_mode_ignores_non_ai_technology_failures(self) -> None:
+        self._mk_tech("database", "redis", placeholder=True)
+        result = self._run("ai")
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+
+    def test_core_mode_fails_on_malformed_front_matter(self) -> None:
+        self._mk_core("release-management", malformed=True)
+        result = self._run("core")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("missing front matter field", result.stderr)
+
+    def test_all_mode_fails_on_broken_metadata(self) -> None:
+        self._mk_tech("devops", "terraform", broken_meta=True)
+        result = self._run("all")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("missing required field", result.stderr)
+
+
+class SkillMetadataTests(unittest.TestCase):
+    """Verify skill.meta.yaml exists and has correct content for all technology skills."""
+
+    SKILLS_ROOT = REPO_ROOT / ".ai" / "skills"
+    REQUIRED_FIELDS = ("name", "domain", "version", "owner", "reviewed_at",
+                       "documents", "entrypoint", "path")
+
+    def _tech_dirs(self) -> list[Path]:
+        dirs = []
+        for domain_dir in self.SKILLS_ROOT.iterdir():
+            if not domain_dir.is_dir() or domain_dir.name == "core":
+                continue
+            for tech_dir in domain_dir.iterdir():
+                if tech_dir.is_dir():
+                    dirs.append(tech_dir)
+        return sorted(dirs)
+
+    def test_all_tech_skills_have_meta(self) -> None:
+        missing = [d for d in self._tech_dirs() if not (d / "skill.meta.yaml").exists()]
+        self.assertEqual(missing, [], f"Missing skill.meta.yaml in: {missing}")
+
+    def test_meta_has_required_fields(self) -> None:
+        for tech_dir in self._tech_dirs():
+            meta = (tech_dir / "skill.meta.yaml").read_text(encoding="utf-8")
+            for field in self.REQUIRED_FIELDS:
+                self.assertIn(f"{field}:", meta,
+                              f"{tech_dir.relative_to(REPO_ROOT)}/skill.meta.yaml missing field '{field}'")
+
+    def test_reviewed_at_format(self) -> None:
+        pattern = re.compile(r"^reviewed_at:\s*['\"]?(\d{4}-\d{2}-\d{2})['\"]?", re.MULTILINE)
+        for tech_dir in self._tech_dirs():
+            meta = (tech_dir / "skill.meta.yaml").read_text(encoding="utf-8")
+            m = pattern.search(meta)
+            self.assertIsNotNone(m, f"{tech_dir.name}/skill.meta.yaml: reviewed_at missing or wrong format")
+
+    def test_domain_matches_directory(self) -> None:
+        for tech_dir in self._tech_dirs():
+            expected_domain = tech_dir.parent.name
+            meta = (tech_dir / "skill.meta.yaml").read_text(encoding="utf-8")
+            m = re.search(r"^domain:\s*['\"]?(\S+?)['\"]?\s*$", meta, re.MULTILINE)
+            self.assertIsNotNone(m, f"{tech_dir.name}: domain field not found")
+            self.assertEqual(m.group(1), expected_domain,
+                             f"{tech_dir.name}: domain '{m.group(1)}' != dir '{expected_domain}'")
+
+    def test_name_matches_directory(self) -> None:
+        for tech_dir in self._tech_dirs():
+            expected_name = tech_dir.name
+            meta = (tech_dir / "skill.meta.yaml").read_text(encoding="utf-8")
+            m = re.search(r"^name:\s*['\"]?(\S+?)['\"]?\s*$", meta, re.MULTILINE)
+            self.assertIsNotNone(m, f"{tech_dir.name}: name field not found")
+            self.assertEqual(m.group(1), expected_name,
+                             f"{tech_dir.name}: name '{m.group(1)}' != dir '{expected_name}'")
+
+
+class SkillContentTests(unittest.TestCase):
+    """Verify that technology skill documents contain no placeholder markers."""
+
+    SKILLS_ROOT = REPO_ROOT / ".ai" / "skills"
+    PLACEHOLDER_PATTERN = re.compile(r"PLACEHOLDER|not yet written|generic kit template", re.IGNORECASE)
+
+    def _tech_docs(self) -> list[Path]:
+        docs = []
+        for domain_dir in self.SKILLS_ROOT.iterdir():
+            if not domain_dir.is_dir() or domain_dir.name == "core":
+                continue
+            for tech_dir in domain_dir.iterdir():
+                if not tech_dir.is_dir():
+                    continue
+                for doc in ("overview", "patterns", "best-practices", "pitfalls", "examples"):
+                    path = tech_dir / f"{doc}.md"
+                    if path.exists():
+                        docs.append(path)
+        return sorted(docs)
+
+    def test_no_placeholder_in_skill_docs(self) -> None:
+        flagged = []
+        for path in self._tech_docs():
+            text = path.read_text(encoding="utf-8")
+            if self.PLACEHOLDER_PATTERN.search(text):
+                flagged.append(str(path.relative_to(REPO_ROOT)))
+        self.assertEqual(flagged, [], f"Placeholder content found in: {flagged}")
 
 
 if __name__ == "__main__":

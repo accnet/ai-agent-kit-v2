@@ -1,5 +1,6 @@
-# kubernetes Patterns
+# Kubernetes Patterns
 
-> ⚠️ PLACEHOLDER — not yet written for kubernetes. This file still holds the generic kit template below, with no kubernetes-specific guidance. Do not treat it as real domain knowledge; replace it with actual kubernetes patterns/pitfalls/examples before relying on it.
-
-Keep boundaries explicit, use project-native configuration and error handling, and isolate external effects behind tested interfaces. Prefer small composable units over framework-wide changes for a scoped task.
+- Deploy immutable container images by digest/tag policy.
+- Set requests/limits and health probes for every workload.
+- Use rolling/canary strategies with readiness gates.
+- Externalize config via ConfigMap/Secret references, not baked values.

@@ -1,5 +1,6 @@
-# redis Pitfalls
+# Redis Pitfalls
 
-> ⚠️ PLACEHOLDER — not yet written for redis. This file still holds the generic kit template below, with no redis-specific guidance. Do not treat it as real domain knowledge; replace it with actual redis patterns/pitfalls/examples before relying on it.
-
-Avoid introducing a parallel architecture, bypassing validation, silently swallowing errors, broad dependency upgrades, or copying snippets that conflict with the current project version.
+- Unbounded key cardinality from user-generated key components.
+- Missing TTLs leading to memory pressure and eviction of critical keys.
+- Assuming in-memory writes are durable enough for source-of-truth data.
+- Non-atomic read-modify-write race conditions.

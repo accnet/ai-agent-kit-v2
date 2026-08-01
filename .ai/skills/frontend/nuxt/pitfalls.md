@@ -1,5 +1,6 @@
-# nuxt Pitfalls
+# Nuxt Pitfalls
 
-> ⚠️ PLACEHOLDER — not yet written for nuxt. This file still holds the generic kit template below, with no nuxt-specific guidance. Do not treat it as real domain knowledge; replace it with actual nuxt patterns/pitfalls/examples before relying on it.
-
-Avoid introducing a parallel architecture, bypassing validation, silently swallowing errors, broad dependency upgrades, or copying snippets that conflict with the current project version.
+- Hydration mismatch from non-deterministic server/client rendering.
+- Mixing server secrets into client bundle code paths.
+- Large global plugins that inflate every page payload.
+- Ignoring route-level loading/error handling.

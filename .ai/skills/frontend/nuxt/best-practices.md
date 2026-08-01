@@ -1,9 +1,6 @@
-# nuxt Best Practices
+# Nuxt Best Practices
 
-> ⚠️ PLACEHOLDER — not yet written for nuxt. This file still holds the generic kit template below, with no nuxt-specific guidance. Do not treat it as real domain knowledge; replace it with actual nuxt patterns/pitfalls/examples before relying on it.
-
-- Follow pinned project versions and existing conventions.
-- Validate untrusted input at boundaries.
-- Keep secrets in environment-backed configuration, never source files.
-- Add focused tests for changed behavior.
-- Make operational impact observable where applicable.
+- Guard browser-only APIs behind client checks.
+- Validate route params and query state before data fetching.
+- Use typed APIs/composables where project tooling allows.
+- Add component/page tests for critical journeys and error states.

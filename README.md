@@ -16,6 +16,7 @@ python .ai/engine/ai_kit.py add-task T1 --title "Plan" --owner planner --phase p
 python .ai/engine/ai_kit.py add-task T2 --title "Build" --owner backend --phase build --needs T1 --acceptance "Focused tests pass"
 python .ai/engine/ai_kit.py ready
 python .ai/engine/ai_kit.py route T1
+python .ai/engine/ai_kit.py route T1 --explain
 ```
 
 Move a task through `start`, `complete`, `qa-pass`, `review-approve`, and
@@ -23,6 +24,18 @@ Move a task through `start`, `complete`, `qa-pass`, `review-approve`, and
 to `.ai-work/state/workflow.json` and audit events to `.ai-work/logs/events.jsonl`.
 
 The kit is tool-agnostic. `AGENTS.md` is the authoritative instruction file.
+
+## Skill Routing And Metadata
+
+- `route T<n>` now returns:
+  - backward-compatible `skills` entrypoints
+  - `skill_details` with each selected skill's path, entrypoint, full document
+    list, selection reasons, and loading phase/order
+  - `trigger_matches` and `loading_instructions`
+- `route T<n> --explain` adds routing diagnostics (`role_domains`, task tokens,
+  phase order, and selection counts).
+- Technology skills use `skill.meta.yaml`; schema is documented in
+  `.ai/skills/SKILL-METADATA.md`.
 
 ## Gate Rules Configuration
 
@@ -93,6 +106,21 @@ Both installers stop before replacing a different managed file. Use
   `runners.yaml`, `contexts.yaml`, `epics.yaml`, `registry.yaml`,
   `automation.yaml`); never overwritten by re-installs.
 - `.ai-work/`: current plan, tasks, and ephemeral state.
+
+## Skill Validation Modes
+
+`bash .ai/scripts/check-skills.sh` defaults to `all` and enforces:
+
+- required documents and non-empty content
+- placeholder marker rejection
+- metadata contract/path alignment (`skill.meta.yaml`)
+- core `SKILL.md` front matter contract
+
+Additional modes:
+
+- `bash .ai/scripts/check-skills.sh core` — core skills only
+- `bash .ai/scripts/check-skills.sh ai` — AI technology skills plus AI-trigger
+  core skills
 
 ## Compatibility with v1
 

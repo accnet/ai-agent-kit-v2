@@ -1,5 +1,5 @@
-# redis Overview
+# Redis Overview
 
-> ⚠️ PLACEHOLDER — not yet written for redis. This file still holds the generic kit template below, with no redis-specific guidance. Do not treat it as real domain knowledge; replace it with actual redis patterns/pitfalls/examples before relying on it.
+Use this skill for cache/session/queue logic backed by Redis. Confirm deployment mode (standalone/sentinel/cluster) and eviction policy before changes.
 
-Use this reference when a task explicitly involves redis in the database domain. First inspect the project's existing redis usage and versions; this kit supplies guardrails, not a replacement architecture.
+Treat Redis as performance infrastructure with explicit consistency expectations.

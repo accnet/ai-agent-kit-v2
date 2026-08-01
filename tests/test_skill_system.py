@@ -288,7 +288,7 @@ class CheckSkillsPlaceholderTests(unittest.TestCase):
         """check-skills.sh passes on the real repository after ai content is written."""
         rc, out, _ = run_check_skills()
         self.assertEqual(rc, 0, f"check-skills.sh failed: {out}")
-        self.assertIn("v2 skills valid", out)
+        self.assertIn("check-skills[all]: valid", out)
 
     def test_placeholder_in_ai_overview_is_rejected(self) -> None:
         """check-skills.sh rejects a placeholder marker in ai/*/overview.md."""
@@ -305,13 +305,23 @@ class CheckSkillsPlaceholderTests(unittest.TestCase):
                     else "Real content here.\n"
                 )
                 (ai_dir / f"{doc}.md").write_text(f"# testskill {doc}\n\n{content}")
+            (ai_dir / "skill.meta.yaml").write_text(
+                "name: testskill\n"
+                "domain: ai\n"
+                "version: 1.0.0\n"
+                "owner: backend\n"
+                "reviewed_at: 2026-01-01\n"
+                "entrypoint: .ai/skills/ai/testskill/overview.md\n"
+                "path: .ai/skills/ai/testskill\n"
+                "documents: [overview.md, patterns.md, best-practices.md, pitfalls.md, examples.md]\n"
+            )
 
             rc, out, err = run_check_skills(root=tmp_path)
             self.assertNotEqual(rc, 0, "check-skills.sh should fail on placeholder ai skill")
             self.assertIn("placeholder", (out + err).lower())
 
     def test_non_placeholder_ai_skill_passes(self) -> None:
-        """check-skills.sh passes for an ai skill with real content."""
+        """check-skills.sh passes for an ai skill with real content and valid metadata."""
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             make_minimal_skill_tree(tmp_path)
@@ -322,12 +332,22 @@ class CheckSkillsPlaceholderTests(unittest.TestCase):
                 (ai_dir / f"{doc}.md").write_text(
                     f"# testskill {doc}\n\nProduction-ready guidance here.\n"
                 )
+            (ai_dir / "skill.meta.yaml").write_text(
+                "name: testskill\n"
+                "domain: ai\n"
+                "version: 1.0.0\n"
+                "owner: backend\n"
+                "reviewed_at: 2026-01-01\n"
+                "entrypoint: .ai/skills/ai/testskill/overview.md\n"
+                "path: .ai/skills/ai/testskill\n"
+                "documents: [overview.md, patterns.md, best-practices.md, pitfalls.md, examples.md]\n"
+            )
 
             rc, out, _ = run_check_skills(root=tmp_path)
             self.assertEqual(rc, 0, f"check-skills.sh failed unexpectedly: {out}")
 
-    def test_placeholder_in_non_ai_skill_is_not_rejected(self) -> None:
-        """Placeholder markers outside the ai domain do not fail check-skills.sh."""
+    def test_placeholder_in_non_ai_skill_is_rejected(self) -> None:
+        """Placeholder markers outside the ai domain also fail check-skills.sh."""
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             make_minimal_skill_tree(tmp_path)
@@ -340,10 +360,21 @@ class CheckSkillsPlaceholderTests(unittest.TestCase):
                     "⚠️ PLACEHOLDER — not yet written.\n"
                     "Real guidance pending.\n"
                 )
+            (other_dir / "skill.meta.yaml").write_text(
+                "name: somephp\n"
+                "domain: backend\n"
+                "version: 1.0.0\n"
+                "owner: backend\n"
+                "reviewed_at: 2026-01-01\n"
+                "entrypoint: .ai/skills/backend/somephp/overview.md\n"
+                "path: .ai/skills/backend/somephp\n"
+                "documents: [overview.md, patterns.md, best-practices.md, pitfalls.md, examples.md]\n"
+            )
 
-            rc, out, _ = run_check_skills(root=tmp_path)
-            self.assertEqual(rc, 0,
-                             f"Non-ai placeholder should not fail check-skills.sh: {out}")
+            rc, out, err = run_check_skills(root=tmp_path)
+            self.assertNotEqual(rc, 0,
+                                f"Placeholder in non-ai skill should also fail: {out}")
+            self.assertIn("placeholder", (out + err).lower())
 
 
 class RegistryValidityTests(unittest.TestCase):

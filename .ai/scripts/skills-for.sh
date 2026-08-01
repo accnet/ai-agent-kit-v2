@@ -69,7 +69,21 @@ for domain_or_tech in $domains; do
       -name "$domain_or_tech" ! -path '.ai/skills/core/*' | sort
   fi
 done | awk '!seen[$0]++' | while IFS= read -r folder; do
-  printf '%s\n' "$folder/overview.md"
+  entrypoint="$folder/overview.md"
+  if [[ -f "$folder/skill.meta.yaml" ]]; then
+    configured_entrypoint="$(awk -F': ' '/^entrypoint:/ {print $2}' "$folder/skill.meta.yaml" | head -n1)"
+    if [[ -n "$configured_entrypoint" && -f "$configured_entrypoint" ]]; then
+      entrypoint="$configured_entrypoint"
+    fi
+  fi
+  if [[ -n "${stack:-}" ]]; then
+    name="$(basename "$folder")"
+    domain="$(basename "$(dirname "$folder")")"
+    if ! grep -Eiq "(^|[[:space:]])$name([[:space:]]|$)|(^|[[:space:]])$domain([[:space:]]|$)" <<< "$stack"; then
+      continue
+    fi
+  fi
+  printf '%s\n' "$entrypoint"
 done
 
 case "$role" in
@@ -78,7 +92,7 @@ case "$role" in
   backend) core="api-contract observability" ;;
   frontend) core="frontend-core test-and-validation" ;;
   database) core="data-migration api-contract" ;;
-  devops|release) core="deployment-infra observability" ;;
+  devops) core="deployment-infra observability" ;;
   qa) core="test-and-validation debugging" ;;
   reviewer) core="code-review api-contract" ;;
   security) core="security-review threat-modeling" ;;

@@ -1,5 +1,5 @@
-# mysql Overview
+# MySQL Overview
 
-> ⚠️ PLACEHOLDER — not yet written for mysql. This file still holds the generic kit template below, with no mysql-specific guidance. Do not treat it as real domain knowledge; replace it with actual mysql patterns/pitfalls/examples before relying on it.
+Use this skill for MySQL schema/query/index changes. Inspect server version and current SQL mode before relying on version-specific behavior.
 
-Use this reference when a task explicitly involves mysql in the database domain. First inspect the project's existing mysql usage and versions; this kit supplies guardrails, not a replacement architecture.
+Prioritize safe migrations, index-aware query design, and rollbackability.

@@ -1,5 +1,5 @@
-# nuxt Overview
+# Nuxt Overview
 
-> ⚠️ PLACEHOLDER — not yet written for nuxt. This file still holds the generic kit template below, with no nuxt-specific guidance. Do not treat it as real domain knowledge; replace it with actual nuxt patterns/pitfalls/examples before relying on it.
+Use this skill for Nuxt (Vue SSR/SSG) applications. Inspect the project Nuxt major version and module ecosystem before edits.
 
-Use this reference when a task explicitly involves nuxt in the frontend domain. First inspect the project's existing nuxt usage and versions; this kit supplies guardrails, not a replacement architecture.
+Preserve existing conventions for routing, data fetching, and server/client boundary handling.

@@ -1,5 +1,6 @@
-# mysql Patterns
+# MySQL Patterns
 
-> ⚠️ PLACEHOLDER — not yet written for mysql. This file still holds the generic kit template below, with no mysql-specific guidance. Do not treat it as real domain knowledge; replace it with actual mysql patterns/pitfalls/examples before relying on it.
-
-Keep boundaries explicit, use project-native configuration and error handling, and isolate external effects behind tested interfaces. Prefer small composable units over framework-wide changes for a scoped task.
+- Additive migrations first: add nullable column/backfill/enforce constraints later.
+- Use explicit transaction scopes for consistent multi-step updates.
+- Validate query plans (`EXPLAIN`) when adding or changing predicates.
+- Prefer covering indexes for high-frequency read paths.

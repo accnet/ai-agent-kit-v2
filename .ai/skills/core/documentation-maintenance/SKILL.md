@@ -11,27 +11,30 @@ related: []
 
 # Skill: documentation-maintenance
 
-> ⚠️ PLACEHOLDER — not yet written for documentation-maintenance. The procedure, checklist, and anti-patterns below are the generic kit template, not documentation-maintenance-specific guidance. Replace them with concrete, actionable content before relying on this skill for a real task.
-
-
 ## Purpose
-Keep user, API, operational, and decision documentation synchronized with delivered behavior.
+Keep user/API/operational/decision documentation synchronized with delivered behavior and constraints.
 
 ## When to use
-Use when a task matches this domain, before the owning agent claims completion.
+Any change affecting public interfaces, workflows, operational procedures, architecture decisions, or developer usage.
 
 ## Procedure
-Identify affected audiences, update only authoritative documents, verify commands/examples, record compatibility notes, and remove stale instructions.
+1. Identify authoritative docs touched by the behavior change (README, AGENTS, router docs, API references).
+2. Update contracts, examples, commands, and caveats to match implementation exactly.
+3. Call out version-sensitive assumptions and environment prerequisites.
+4. Link docs to verification evidence and known limitations.
+5. Remove stale guidance that conflicts with current behavior.
 
 ## Checklist
-- [ ] Audience and source of truth are identified
-- [ ] Examples are runnable
-- [ ] Compatibility notes are present
-- [ ] Stale content is removed
+- [ ] All changed behavior has matching documentation updates.
+- [ ] Examples/commands are runnable and current.
+- [ ] Constraints, trigger precedence, and gate requirements are explicit.
+- [ ] No contradictory instructions remain across docs.
+- [ ] Residual limitations are documented honestly.
 
 ## Anti-patterns
-- Marking work complete from intuition instead of recorded evidence.
-- Expanding scope without a planned task and owner.
+- Shipping behavior changes while leaving old docs in place.
+- Copying generic guidance without repository-local references.
+- Documenting capabilities that have no executable evidence.
 
 ## Output
-Record the decision, evidence paths, and residual risk in the workflow state and the appropriate .ai-work report.
+Synchronized documentation set with traceable links to code and tests.

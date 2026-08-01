@@ -1,9 +1,6 @@
-# php Best Practices
+# PHP Best Practices
 
-> ⚠️ PLACEHOLDER — not yet written for php. This file still holds the generic kit template below, with no php-specific guidance. Do not treat it as real domain knowledge; replace it with actual php patterns/pitfalls/examples before relying on it.
-
-- Follow pinned project versions and existing conventions.
-- Validate untrusted input at boundaries.
-- Keep secrets in environment-backed configuration, never source files.
-- Add focused tests for changed behavior.
-- Make operational impact observable where applicable.
+- Confirm strict types usage and match existing coding standard config.
+- Validate and sanitize input at boundary layers.
+- Handle exceptions with domain-specific mapping and structured logs.
+- Add/adjust tests at the same layer as the changed behavior.
