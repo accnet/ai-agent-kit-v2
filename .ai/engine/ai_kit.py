@@ -21,6 +21,7 @@ WORK = ROOT / ".ai-work"
 STATE = WORK / "state" / "workflow.json"
 CURRENT = WORK / "state" / "current.json"
 EVENT_LOG = WORK / "logs" / "events.jsonl"
+VISUALIZER_DIR = ROOT / ".visualizer"
 CONFIG_FILES = {
     "runners.yaml",
     "automation.yaml",
@@ -395,8 +396,30 @@ def _context_revision(name: str | None) -> int | None:
         return None
     try:
         return int(contexts[name]["revision"])
-    except ValueError:
+    except (TypeError, ValueError):
         return None
+
+
+def _context_upstreams(name: str | None, contexts: dict | None = None) -> list[str]:
+    """Return a context's declared upstream modules in deterministic order."""
+    if not name:
+        return []
+    contexts = contexts if contexts is not None else _load_contexts()
+    if name not in contexts:
+        return []
+    return list(dict.fromkeys(contexts[name].get("depends_on", []) or []))
+
+
+def _upstream_context_revisions(name: str | None, contexts: dict | None = None) -> dict[str, int]:
+    contexts = contexts if contexts is not None else _load_contexts()
+    revisions = {}
+    for upstream in _context_upstreams(name, contexts):
+        revision = contexts.get(upstream, {}).get("revision")
+        try:
+            revisions[upstream] = int(revision)
+        except (TypeError, ValueError):
+            continue
+    return revisions
 
 
 def _epic_revision(name: str | None) -> int | None:
@@ -618,6 +641,7 @@ def validate(state: dict) -> None:
         task.setdefault("epic_revision", None)
         task.setdefault("depends_on", [])
         task.setdefault("contract_hashes", {})
+        task.setdefault("upstream_context_revisions", {})
     missing = set()  # reset after migration
     if missing:
         raise EngineError(f"state missing keys: {', '.join(sorted(missing))}")
@@ -802,6 +826,53 @@ def event(state: dict, path: Path, action: str, task: dict | None, actor: str, o
     return item
 
 
+def _generate_visualizer_data(state_arg: str | Path | None = None) -> dict:
+    if not VISUALIZER_DIR.exists():
+        return {}
+    state_path_value = state_path(str(state_arg) if state_arg is not None else None)
+    state = load(state_path_value)
+    validate(state)
+    board = {status: [] for status in STATUSES}
+    for task in state["tasks"]:
+        entry = _board_entry(task)
+        entry["tags"] = task.get("tags", [])
+        entry["files"] = task.get("files", [])
+        entry["acceptance_count"] = len(task.get("acceptance", []))
+        board[task["status"]].append(entry)
+
+    architecture = _load_contexts()
+    impact = {}
+    for name in architecture:
+        impact[name] = cmd_context_impact(argparse.Namespace(state=str(state_path_value), name=name, _state=state))
+
+    events = []
+    if EVENT_LOG.exists():
+        lines = [line.strip() for line in EVENT_LOG.read_text(encoding="utf-8").splitlines() if line.strip()]
+        for line in lines[-200:]:
+            try:
+                events.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+
+    VISUALIZER_DIR.mkdir(parents=True, exist_ok=True)
+    payloads = {
+        "board.json": board,
+        "architecture.json": architecture,
+        "impact.json": impact,
+        "events.json": events,
+    }
+    for filename, payload in payloads.items():
+        (VISUALIZER_DIR / filename).write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    return payloads
+
+
+def _auto_generate_visualizer_data(path: Path) -> None:
+    try:
+        _generate_visualizer_data(path)
+    except Exception as exc:
+        print(f"WARNING: visualizer regeneration failed: {exc}", file=sys.stderr)
+
+
 def cmd_init(args: argparse.Namespace) -> dict:
     path = state_path(args.state)
     if path.exists() and not args.force:
@@ -814,6 +885,7 @@ def cmd_init(args: argparse.Namespace) -> dict:
     state = new_state(args.title, args.workflow)
     event(state, path, "init", None, args.actor, None, None, "workflow initialized")
     save(state, path)
+    _auto_generate_visualizer_data(path)
     return state
 
 
@@ -829,13 +901,14 @@ def cmd_add_task(args: argparse.Namespace) -> dict:
     context_revision = _context_revision(context)
     epic = getattr(args, "epic", None)
     depends_on = args.depends_on or []
-    task = {"id": args.id, "title": args.title, "owner": args.owner, "phase": args.phase, "needs": args.needs or [], "status": "todo", "acceptance": acceptance, "files": args.files or [], "tags": args.tags or [], "attempts": 0, "evidence": [], "blocked_reason": None, "claimed_by": None, "context": context, "epic": epic, "base_commit": _git_head(), "context_revision": context_revision, "epic_revision": _epic_revision(epic), "depends_on": depends_on, "contract_hashes": _contract_hashes(depends_on)}
+    task = {"id": args.id, "title": args.title, "owner": args.owner, "phase": args.phase, "needs": args.needs or [], "status": "todo", "acceptance": acceptance, "files": args.files or [], "tags": args.tags or [], "attempts": 0, "evidence": [], "blocked_reason": None, "claimed_by": None, "context": context, "epic": epic, "base_commit": _git_head(), "context_revision": context_revision, "epic_revision": _epic_revision(epic), "upstream_context_revisions": _upstream_context_revisions(context), "depends_on": depends_on, "contract_hashes": _contract_hashes(depends_on)}
     state["tasks"].append(task)
     validate(state)
     sync_phases(state)
     sync_tasks_md(state, path)
     event(state, path, "add-task", task, args.actor, None, "todo", "task added")
     save(state, path, state["revision"])
+    _auto_generate_visualizer_data(path)
     return task
 
 
@@ -861,6 +934,7 @@ def cmd_update_task(args: argparse.Namespace) -> dict:
     sync_tasks_md(state, path)
     event(state, path, "update-task", task, args.actor, task["status"], task["status"], " | ".join(detail_parts))
     save(state, path, state["revision"])
+    _auto_generate_visualizer_data(path)
     return task
 
 
@@ -915,6 +989,7 @@ def cmd_transition(args: argparse.Namespace) -> dict:
     requested_revision = getattr(args, "expected_revision", None)
     expected = requested_revision if requested_revision is not None else state["revision"]
     save(state, path, expected)
+    _auto_generate_visualizer_data(path)
     return task
 
 
@@ -953,7 +1028,7 @@ def cmd_plan(args: argparse.Namespace) -> dict:
     contract_hashes = _contract_hashes(depends_on)
     acceptance = _flatten_repeated(args.acceptance)
     plan_task = {"id": "T1", "title": "Confirm scope and plan: " + args.idea, "owner": "planner", "phase": "plan", "needs": [], "status": "todo", "acceptance": ["Scope, exclusions, risks, and acceptance criteria confirmed"], "files": [".ai-work/roadmap/roadmap.md", ".ai-work/plan/plan.md", ".ai-work/tasks/tasks.md"], "tags": ["planning"], "attempts": 0, "evidence": [], "blocked_reason": None, "claimed_by": None, "base_commit": base_commit, "context_revision": None, "epic_revision": None, "depends_on": [], "contract_hashes": {}}
-    build_task = {"id": "T2", "title": args.idea, "owner": args.owner, "phase": args.phase, "needs": ["T1"], "status": "todo", "acceptance": acceptance, "files": args.files or [], "tags": args.tags or [], "attempts": 0, "evidence": [], "blocked_reason": None, "claimed_by": None, "context": context, "epic": epic, "base_commit": base_commit, "context_revision": _context_revision(context), "epic_revision": _epic_revision(epic), "depends_on": depends_on, "contract_hashes": contract_hashes}
+    build_task = {"id": "T2", "title": args.idea, "owner": args.owner, "phase": args.phase, "needs": ["T1"], "status": "todo", "acceptance": acceptance, "files": args.files or [], "tags": args.tags or [], "attempts": 0, "evidence": [], "blocked_reason": None, "claimed_by": None, "context": context, "epic": epic, "base_commit": base_commit, "context_revision": _context_revision(context), "epic_revision": _epic_revision(epic), "upstream_context_revisions": _upstream_context_revisions(context), "depends_on": depends_on, "contract_hashes": contract_hashes}
     state["tasks"] = [plan_task, build_task]; validate(state); sync_phases(state)
     root = workspace(path)
     root.joinpath("roadmap").mkdir(parents=True, exist_ok=True); root.joinpath("plan").mkdir(parents=True, exist_ok=True); root.joinpath("tasks").mkdir(parents=True, exist_ok=True)
@@ -962,6 +1037,7 @@ def cmd_plan(args: argparse.Namespace) -> dict:
     sync_tasks_md(state, path)
     event(state, path, "plan", None, args.actor, None, None, "idea converted to draft plan")
     save(state, path)
+    _auto_generate_visualizer_data(path)
     return {"state": display_path(path), "workspace": display_path(root), "tasks": ["T1", "T2"], "assumptions": args.assumptions or "none recorded"}
 
 
@@ -992,22 +1068,74 @@ def cmd_context_add(args: argparse.Namespace) -> dict:
     contexts = _load_contexts()
     if args.name in contexts and not args.force:
         raise EngineError(f"context already registered: {args.name}; use --force to update it (bumps revision)")
+    requested_dependencies = getattr(args, "depends_on", None)
+    dependencies = list(dict.fromkeys(requested_dependencies)) if requested_dependencies is not None else list(contexts.get(args.name, {}).get("depends_on", []) or [])
+    if args.name in dependencies:
+        raise EngineError(f"context cannot depend on itself: {args.name}")
+    for dependency in dependencies:
+        if dependency not in contexts:
+            raise EngineError(f"unknown context dependency: {dependency}")
+    candidate = dict(contexts)
+    candidate[args.name] = {"depends_on": dependencies}
+    seen: set[str] = set()
+    active: set[str] = set()
+
+    def visit(module: str) -> None:
+        if module in active:
+            raise EngineError(f"context dependency cycle detected at {module}")
+        if module in seen:
+            return
+        active.add(module)
+        for dependency in candidate.get(module, {}).get("depends_on", []) or []:
+            visit(dependency)
+        active.remove(module)
+        seen.add(module)
+
+    for module in candidate:
+        visit(module)
     # revision increments on every update so tasks recorded against a stale
     # context (a moved/renamed path glob, a changed owner) can be detected.
     revision = int(contexts[args.name].get("revision", 1)) + 1 if args.name in contexts else 1
     contexts[args.name] = {"path": args.path, "owner": args.owner, "revision": str(revision)}
+    if dependencies:
+        contexts[args.name]["depends_on"] = dependencies
     lines = ["contexts:"]
     for name, fields in sorted(contexts.items()):
         lines.append(f"  {name}:")
         lines.append(f"    path: {fields['path']}")
         lines.append(f"    owner: {fields['owner']}")
         lines.append(f"    revision: {fields.get('revision', 1)}")
+        if fields.get("depends_on"):
+            lines.append(f"    depends_on: {json.dumps(fields['depends_on'], ensure_ascii=False)}")
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    return {"name": args.name, "path": args.path, "owner": args.owner, "revision": revision}
+    return {"name": args.name, "path": args.path, "owner": args.owner, "revision": revision, "depends_on": dependencies}
 
 
 def cmd_context_list(args: argparse.Namespace) -> dict:
     return _load_contexts()
+
+
+def cmd_context_impact(args: argparse.Namespace) -> dict:
+    contexts = _load_contexts()
+    if args.name not in contexts:
+        raise EngineError(f"unknown context: {args.name}")
+    direct = sorted(name for name, fields in contexts.items() if args.name in (fields.get("depends_on") or []))
+    all_dependents: list[str] = []
+    seen: set[str] = set()
+    queue = list(direct)
+    while queue:
+        dependent = queue.pop(0)
+        if dependent in seen:
+            continue
+        seen.add(dependent)
+        all_dependents.append(dependent)
+        queue.extend(sorted(name for name, fields in contexts.items() if dependent in (fields.get("depends_on") or [])))
+    state = getattr(args, "_state", None)
+    if state is None:
+        state = load(state_path(args.state))
+    validate(state)
+    affected = [task["id"] for task in state["tasks"] if task.get("status") != "done" and task.get("context") in {args.name, *all_dependents}]
+    return {"name": args.name, "direct_dependents": direct, "all_dependents": all_dependents, "affected_tasks": affected}
 
 
 def cmd_runner_add(args: argparse.Namespace) -> dict:
@@ -1131,6 +1259,10 @@ def _drift_flags(task: dict) -> dict:
 
     return {
         "context_stale": context_stale,
+        "upstream_context_stale": sorted(
+            name for name, planned in (task.get("upstream_context_revisions") or {}).items()
+            if _context_revision(name) != planned
+        ),
         "epic_stale": epic_stale,
         "contract_stale": contract_stale,
         "drift_unavailable": drift_unavailable,
@@ -1154,6 +1286,7 @@ def cmd_drift(args: argparse.Namespace) -> dict:
     contract_stale = flags["contract_stale"]
     report["contract_stale"] = contract_stale
     report["drift_unavailable"] = flags["drift_unavailable"]
+    report["upstream_context_stale"] = flags["upstream_context_stale"]
 
     base_commit = task.get("base_commit")
     report["base_commit"] = base_commit
@@ -1290,6 +1423,10 @@ def cmd_board(args: argparse.Namespace) -> dict | str:
     if args.format == "markdown":
         return markdown
     return board
+
+
+def cmd_visualizer_generate(args: argparse.Namespace) -> dict:
+    return _generate_visualizer_data(getattr(args, "state", None))
 
 
 def cmd_timeline(args: argparse.Namespace) -> list:
@@ -1680,8 +1817,11 @@ def parser() -> argparse.ArgumentParser:
     graph = sub.add_parser("graph"); graph.add_argument("--context"); graph.set_defaults(fn=cmd_graph)
     board = sub.add_parser("board"); board.add_argument("--context"); board.add_argument("--epic"); board.add_argument("--owner"); board.add_argument("--write", action="store_true"); board.add_argument("--format", choices=["json", "markdown"], default="json"); board.set_defaults(fn=cmd_board)
     context = sub.add_parser("context"); context_sub = context.add_subparsers(dest="context_command", required=True)
-    context_add = context_sub.add_parser("add"); context_add.add_argument("name"); context_add.add_argument("--path", required=True); context_add.add_argument("--owner", required=True); context_add.add_argument("--force", action="store_true", help="update an existing context, bumping its revision"); context_add.set_defaults(fn=cmd_context_add)
+    context_add = context_sub.add_parser("add"); context_add.add_argument("name"); context_add.add_argument("--path", required=True); context_add.add_argument("--owner", required=True); context_add.add_argument("--depends-on", action="append", default=None, metavar="MODULE"); context_add.add_argument("--force", action="store_true", help="update an existing context, bumping its revision"); context_add.set_defaults(fn=cmd_context_add)
     context_list = context_sub.add_parser("list"); context_list.set_defaults(fn=cmd_context_list)
+    context_impact = context_sub.add_parser("impact"); context_impact.add_argument("name"); context_impact.set_defaults(fn=cmd_context_impact)
+    visualizer = sub.add_parser("visualizer"); visualizer_sub = visualizer.add_subparsers(dest="visualizer_command", required=True)
+    visualizer_generate = visualizer_sub.add_parser("generate"); visualizer_generate.set_defaults(fn=cmd_visualizer_generate)
     runner = sub.add_parser("runner"); runner_sub = runner.add_subparsers(dest="runner_command", required=True)
     runner_add = runner_sub.add_parser("add"); runner_add.add_argument("name"); runner_add.add_argument("--command", required=True); runner_add.add_argument("--model"); runner_add.add_argument("--models", nargs="+"); runner_add.add_argument("--provider"); runner_add.add_argument("--description"); runner_add.add_argument("--default-model"); runner_add.add_argument("--default", action="store_true"); runner_add.add_argument("--force", action="store_true"); runner_add.set_defaults(fn=cmd_runner_add)
     runner_list = runner_sub.add_parser("list"); runner_list.set_defaults(fn=cmd_runner_list)

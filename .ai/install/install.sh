@@ -100,6 +100,9 @@ if [[ "$DRY_RUN" -eq 0 ]]; then
   if ! [[ -f "$ignore" ]] || ! grep -qF "$marker" "$ignore"; then
     printf '\n%s\n.ai-work/state/\n.ai-work/logs/\n.ai-work/snapshots/\n.ai-work/**/*.lock\n.ai-work/**/*.tmp\n' "$marker" >> "$ignore"
   fi
+  if ! grep -qF '.visualizer/*.json' "$ignore"; then
+    printf '.visualizer/*.json\n' >> "$ignore"
+  fi
 fi
 
 echo "AI-Kit installed into $TARGET"

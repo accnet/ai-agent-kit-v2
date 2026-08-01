@@ -36,7 +36,13 @@ python .ai/engine/ai_kit.py epic add checkout-revamp --spec .ai-work/plan/checko
 python .ai/engine/ai_kit.py epic add checkout-revamp --spec .ai-work/plan/checkout-revamp-spec.md --owner planner --force
 python .ai/engine/ai_kit.py drift T3
 python .ai/engine/ai_kit.py board --context ordering --format markdown --write
+python .ai/engine/ai_kit.py visualizer generate
 ```
+
+`visualizer generate` exports the current board, module architecture, context
+impact, and the last 200 runtime events into `.visualizer/`. The same export is
+automatically regenerated after every state-mutating command (`init`,
+`add-task`, `update-task`, `transition`, and `plan`).
 
 `complete` means implementation complete. A task becomes `done` only after
 `qa-pass`, `review-approve`, and `close`. QA and review actions require an
@@ -111,6 +117,14 @@ Use these together on a large multi-service project: give each service its
 own context so G6 keeps agents from touching each other's files, and tag
 every task from the same blueprint with one `epic` to track it as a unit.
 
+Contexts may declare module dependencies with repeatable
+`ai-kit context add <name> --depends-on <module>` flags. The registry rejects
+unknown modules, self-dependencies, and cycles. `ai-kit context impact <name>`
+returns direct and transitive dependents plus unfinished tasks in the affected
+modules. Tasks snapshot upstream module revisions when created; `ai-kit drift`
+reports changes in that snapshot as `upstream_context_stale`, independently of
+the task's own `context_stale` flag.
+
 For running multiple agents in parallel, `dispatch-ready --runner X
 [--limit N] [--context C] [--epic E]` claims up to N ready tasks and spawns
 each one's runner as a background process, so they execute concurrently
@@ -160,7 +174,9 @@ a manually-invoked, single-task chain, not a background service.
 Every task also records `base_commit` (git HEAD at creation),
 `context_revision` (its context's `.ai-config/contexts.yaml` revision at creation),
 and `epic_revision` (its epic's Specification revision in `.ai-config/epics.yaml`
-at creation) automatically. `context add ... --force` bumps a context's
+at creation), plus `upstream_context_revisions` for the declared module
+dependencies of its context. These are recorded automatically.
+`context add ... --force` bumps a context's
 revision when its path/owner changes; `epic add <name> --spec <path>
 [--owner <role>] --force` does the same for an epic's Specification doc.
 `ai-kit drift <task-id>` then reports whether a task's context or epic has

@@ -69,6 +69,9 @@ if (-not $DryRun) {
     if (-not (Test-Path -LiteralPath $ignore) -or -not (Select-String -LiteralPath $ignore -SimpleMatch $marker -Quiet)) {
         Add-Content -LiteralPath $ignore -Value "`n$marker`n.ai-work/state/`n.ai-work/logs/`n.ai-work/snapshots/`n.ai-work/**/*.lock`n.ai-work/**/*.tmp"
     }
+    if (-not (Select-String -LiteralPath $ignore -SimpleMatch '.visualizer/*.json' -Quiet)) {
+        Add-Content -LiteralPath $ignore -Value '.visualizer/*.json'
+    }
 }
 
 Write-Output "AI-Kit installed into $targetPath"
