@@ -1,4 +1,4 @@
-﻿---
+---
 name: contract-testing
 description: Verify producer-consumer compatibility for public APIs, events, and schemas.
 version: 2.0.0
@@ -10,6 +10,9 @@ related: []
 ---
 
 # Skill: contract-testing
+
+> ⚠️ PLACEHOLDER — not yet written for contract-testing. The procedure, checklist, and anti-patterns below are the generic kit template, not contract-testing-specific guidance. Replace them with concrete, actionable content before relying on this skill for a real task.
+
 
 ## Purpose
 Verify producer-consumer compatibility for public APIs, events, and schemas.

@@ -1,4 +1,4 @@
-﻿# Backend Agent
+# Backend Agent
 
 ## Mission
 Own the backend perspective while preserving existing project conventions and the approved task scope.

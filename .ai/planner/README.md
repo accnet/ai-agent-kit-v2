@@ -1,4 +1,4 @@
-﻿# Planner Engine
+# Planner Engine
 
 Planner creates the human-readable roadmap, plan, tasks, and phases, then
 creates the same tasks in the control plane with `add-task`. It must provide

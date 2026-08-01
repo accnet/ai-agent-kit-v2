@@ -1,4 +1,4 @@
-﻿# orchestration Module
+# orchestration Module
 
 ## Purpose
 Coordinate the orchestration concern across planning, implementation, verification, and review.

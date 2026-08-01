@@ -1,50 +1,13 @@
+# Bounded-context / service registry for gate G6 (module_boundary).
+# Register one entry per service/module so tasks can be scoped to it, e.g.:
+#
+# contexts:
+#   ordering:
+#     path: src/ordering/*
+#     owner: backend
+#   ui:
+#     path: src/ui/*
+#     owner: frontend
+#
+# Add entries with: ai-kit context add <name> --path <glob> --owner <role>
 contexts:
-  backend-config:
-    path: backend/src/config.ts
-    owner: backend
-    revision: 1
-  backend-db:
-    path: backend/src/db.ts
-    owner: backend
-    revision: 1
-    depends_on: [backend-config]
-  backend-index:
-    path: backend/src/index.ts
-    owner: backend
-    revision: 1
-    depends_on: [backend-config, backend-middleware, backend-routes]
-  backend-languages:
-    path: backend/src/languages.ts
-    owner: backend
-    revision: 1
-  backend-middleware:
-    path: backend/src/middleware.ts
-    owner: backend
-    revision: 1
-    depends_on: [backend-config]
-  backend-normalize:
-    path: backend/src/normalize.ts
-    owner: backend
-    revision: 1
-  backend-routes:
-    path: backend/src/routes.ts
-    owner: backend
-    revision: 1
-    depends_on: [backend-db, backend-normalize, backend-languages, backend-types]
-  backend-types:
-    path: backend/src/types.ts
-    owner: backend
-    revision: 1
-  extension-background:
-    path: extension/background.js
-    owner: frontend
-    revision: 1
-  extension-content:
-    path: extension/content.js
-    owner: frontend
-    revision: 1
-  extension-popup:
-    path: extension/popup.js
-    owner: frontend
-    revision: 1
-    depends_on: [extension-content, backend-routes]

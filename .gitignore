@@ -1,6 +1,7 @@
 # AI-Kit v2 Runtime State
 # G4 gate forbids committing disposable work state
 .ai-work/
+.visualizer/*.json
 
 # Python
 __pycache__/

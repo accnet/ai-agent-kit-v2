@@ -1,4 +1,4 @@
-﻿---
+---
 name: deployment-infra
 description: Packaging, environments, migration rollout, CI/CD, and rollback planning. Use when shipping a feature, running migrations against real environments, or wiring build/deploy. Destructive/prod steps require user approval (Gate G5).
 version: 0.2.0

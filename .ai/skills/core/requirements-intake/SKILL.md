@@ -1,4 +1,4 @@
-﻿---
+---
 name: requirements-intake
 description: Turn a raw request into a clear feature brief with problem, scope, acceptance criteria, and open questions. Use at the very start of a feature to produce .ai-work/requirements/brief.md — the canonical intent that feeds Gate G1.
 version: 0.1.0

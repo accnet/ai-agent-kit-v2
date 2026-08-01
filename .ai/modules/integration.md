@@ -1,4 +1,4 @@
-﻿# integration Module
+# integration Module
 
 ## Purpose
 Coordinate the integration concern across planning, implementation, verification, and review.

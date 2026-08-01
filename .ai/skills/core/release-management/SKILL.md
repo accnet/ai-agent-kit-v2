@@ -1,4 +1,4 @@
-﻿---
+---
 name: release-management
 description: Prepare a verifiable release with compatibility, rollout, rollback, and communication checks.
 version: 2.0.0
@@ -10,6 +10,9 @@ related: []
 ---
 
 # Skill: release-management
+
+> ⚠️ PLACEHOLDER — not yet written for release-management. The procedure, checklist, and anti-patterns below are the generic kit template, not release-management-specific guidance. Replace them with concrete, actionable content before relying on this skill for a real task.
+
 
 ## Purpose
 Prepare a verifiable release with compatibility, rollout, rollback, and communication checks.

@@ -1,4 +1,4 @@
-﻿# architecture Module
+# architecture Module
 
 ## Purpose
 Coordinate the architecture concern across planning, implementation, verification, and review.

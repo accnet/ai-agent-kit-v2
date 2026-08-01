@@ -1,4 +1,4 @@
-﻿---
+---
 name: workflow-orchestration
 description: Operate multi-agent tasks through ownership, DAG dependencies, evidence, retries, and recovery.
 version: 2.0.0
@@ -10,6 +10,9 @@ related: []
 ---
 
 # Skill: workflow-orchestration
+
+> ⚠️ PLACEHOLDER — not yet written for workflow-orchestration. The procedure, checklist, and anti-patterns below are the generic kit template, not workflow-orchestration-specific guidance. Replace them with concrete, actionable content before relying on this skill for a real task.
+
 
 ## Purpose
 Operate multi-agent tasks through ownership, DAG dependencies, evidence, retries, and recovery.

@@ -1,4 +1,4 @@
-﻿# Review
+# Review
 
 Review the changed paths against task acceptance criteria, project conventions,
 security, error handling, tests, and rollback impact. Record `approve` or

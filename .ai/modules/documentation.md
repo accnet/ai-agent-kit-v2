@@ -1,4 +1,4 @@
-﻿# documentation Module
+# documentation Module
 
 ## Purpose
 Coordinate the documentation concern across planning, implementation, verification, and review.

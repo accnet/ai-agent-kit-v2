@@ -1,4 +1,4 @@
-﻿# Integration Agent
+# Integration Agent
 
 ## Mission
 Own the integration perspective while preserving existing project conventions and the approved task scope.

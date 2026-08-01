@@ -1,4 +1,4 @@
-﻿# accessibility Module
+# accessibility Module
 
 ## Purpose
 Coordinate the accessibility concern across planning, implementation, verification, and review.

@@ -1,4 +1,4 @@
-﻿---
+---
 name: webhooks-and-retries
 description: Implement signed, idempotent webhooks and retry-safe external side effects.
 version: 2.0.0
@@ -10,6 +10,9 @@ related: []
 ---
 
 # Skill: webhooks-and-retries
+
+> ⚠️ PLACEHOLDER — not yet written for webhooks-and-retries. The procedure, checklist, and anti-patterns below are the generic kit template, not webhooks-and-retries-specific guidance. Replace them with concrete, actionable content before relying on this skill for a real task.
+
 
 ## Purpose
 Implement signed, idempotent webhooks and retry-safe external side effects.

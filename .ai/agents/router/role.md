@@ -1,4 +1,4 @@
-﻿# Router Agent
+# Router Agent
 
 ## Mission
 Own the router perspective while preserving existing project conventions and the approved task scope.

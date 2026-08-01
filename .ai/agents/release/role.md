@@ -1,4 +1,4 @@
-﻿# Release Agent
+# Release Agent
 
 ## Mission
 Own the release perspective while preserving existing project conventions and the approved task scope.

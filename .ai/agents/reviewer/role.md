@@ -1,4 +1,4 @@
-﻿# Reviewer Agent
+# Reviewer Agent
 
 ## Mission
 Own the reviewer perspective while preserving existing project conventions and the approved task scope.

@@ -1,4 +1,4 @@
-﻿---
+---
 name: debugging
 description: Structured defect/regression workflow — reproduce, isolate, diagnose, fix, and lock with a regression test. Use when behavior diverges from expected and the cause isn't obvious.
 version: 0.1.0

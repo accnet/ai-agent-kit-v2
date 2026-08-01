@@ -1,4 +1,4 @@
-﻿# Gates
+# Gates
 
 G1 requires `.ai-work/tasks/tasks.md` with acceptance criteria before implementation.
 G2 requires those criteria and relevant verification commands to pass before a

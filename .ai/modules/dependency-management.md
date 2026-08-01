@@ -1,4 +1,4 @@
-﻿# dependency-management Module
+# dependency-management Module
 
 ## Purpose
 Coordinate the dependency-management concern across planning, implementation, verification, and review.

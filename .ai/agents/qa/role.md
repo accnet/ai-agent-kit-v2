@@ -1,4 +1,4 @@
-﻿# Qa Agent
+# Qa Agent
 
 ## Mission
 Own the qa perspective while preserving existing project conventions and the approved task scope.

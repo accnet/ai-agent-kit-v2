@@ -1,4 +1,4 @@
-﻿---
+---
 name: e2e-testing
 description: Verify critical user journeys across real boundaries with deterministic environments and fixtures.
 version: 2.0.0
@@ -10,6 +10,9 @@ related: []
 ---
 
 # Skill: e2e-testing
+
+> ⚠️ PLACEHOLDER — not yet written for e2e-testing. The procedure, checklist, and anti-patterns below are the generic kit template, not e2e-testing-specific guidance. Replace them with concrete, actionable content before relying on this skill for a real task.
+
 
 ## Purpose
 Verify critical user journeys across real boundaries with deterministic environments and fixtures.

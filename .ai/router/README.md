@@ -1,4 +1,4 @@
-﻿# Agent Router
+# Agent Router
 
 Use `python .ai/engine/ai_kit.py route T<n>` to return the assigned v2 role
 contract, scoped technology knowledge, imported core skills, and minimal task

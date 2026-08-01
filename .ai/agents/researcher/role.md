@@ -1,4 +1,4 @@
-﻿# Researcher Agent
+# Researcher Agent
 
 ## Mission
 Own the researcher perspective while preserving existing project conventions and the approved task scope.

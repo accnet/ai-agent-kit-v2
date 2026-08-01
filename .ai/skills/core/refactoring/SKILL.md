@@ -1,4 +1,4 @@
-﻿---
+---
 name: refactoring
 description: Behavior-preserving structural change — restructure code without altering observable behavior, with tests as the safety net. Use for cleanup, decoupling, or renaming, not for new behavior.
 version: 0.1.0

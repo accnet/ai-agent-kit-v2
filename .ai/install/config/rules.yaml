@@ -1,4 +1,4 @@
-﻿planning_first: true
+planning_first: true
 minimal_context: true
 review_required: true
 db_changes_require_plan: true

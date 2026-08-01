@@ -1,4 +1,4 @@
-﻿---
+---
 name: nodejs-api-core
 description: Implementation pattern for a Node/TypeScript API layer — repository (data access) → service (business logic/selection) → creation/transaction flow, using authenticated identity for ownership/authorization decisions. Use when building or changing API service/repository code. Test code stays in the project.
 version: 0.2.0

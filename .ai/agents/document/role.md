@@ -1,4 +1,4 @@
-﻿# Document Agent
+# Document Agent
 
 ## Mission
 Own the document perspective while preserving existing project conventions and the approved task scope.

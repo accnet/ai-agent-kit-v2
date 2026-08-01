@@ -1,3 +1,3 @@
-﻿# threat-modeling Best Practices
+# threat-modeling Best Practices
 
 Use the checklist in SKILL.md, keep scope small, and retain reproducible evidence.

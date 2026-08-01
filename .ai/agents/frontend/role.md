@@ -1,4 +1,4 @@
-﻿# Frontend Agent
+# Frontend Agent
 
 ## Mission
 Own the frontend perspective while preserving existing project conventions and the approved task scope.

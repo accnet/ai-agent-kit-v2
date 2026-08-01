@@ -1,3 +1,3 @@
-﻿# github-actions-ci Patterns
+# github-actions-ci Patterns
 
 Apply this skill through the assigned role, task acceptance criteria, and workflow evidence.

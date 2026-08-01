@@ -836,6 +836,7 @@ def _generate_visualizer_data(state_arg: str | Path | None = None) -> dict:
             "architecture.json": _load_contexts(),
             "impact.json": {},
             "events.json": [],
+            "dag.json": {"tasks": [], "edges": [], "waves": 0, "ready": [], "critical_path": []},
         }
         for filename, payload in payloads.items():
             (VISUALIZER_DIR / filename).write_text(
@@ -872,6 +873,7 @@ def _generate_visualizer_data(state_arg: str | Path | None = None) -> dict:
         "architecture.json": architecture,
         "impact.json": impact,
         "events.json": events,
+        "dag.json": _generate_dag_payload(state),
     }
     for filename, payload in payloads.items():
         (VISUALIZER_DIR / filename).write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
@@ -1230,6 +1232,133 @@ def cmd_epic_add(args: argparse.Namespace) -> dict:
 
 def cmd_epic_list(args: argparse.Namespace) -> dict:
     return _load_epics()
+
+
+# Index of each status in the kit's linear 6-step lifecycle (todo -> ... ->
+# done). `blocked` has no place on this axis -- it's an orthogonal branch,
+# not a stage -- and is represented separately as -1.
+STAGE_INDEX = {
+    "todo": 0,
+    "in-progress": 1,
+    "implementation-complete": 2,
+    "qa-passed": 3,
+    "review-approved": 4,
+    "done": 5,
+}
+
+
+def _task_stage(status: str) -> int:
+    return STAGE_INDEX.get(status, -1)
+
+
+def _remaining_stages(status: str) -> int:
+    """Stages left until 'done', used as each task's weight on the critical path.
+
+    A blocked task's true remaining distance is unknown (its last active
+    stage isn't tracked), so it's weighted at the maximum (5) -- treated as
+    unresolved work rather than assumed to be nearly finished.
+    """
+    if status == "blocked":
+        return 5
+    return 5 - STAGE_INDEX.get(status, 0)
+
+
+def _task_history(state: dict) -> dict[str, dict[str, str]]:
+    """First timestamp each task reached each status, from the in-memory event log.
+
+    state["events"] is the full append-only history for this workflow (see
+    `event()`), so this needs no separate read of events.jsonl and stays
+    correct for whichever --state file is in play.
+    """
+    history: dict[str, dict[str, str]] = {}
+    for item in state.get("events", []):
+        task_id, to_status, ts = item.get("task"), item.get("to"), item.get("ts")
+        if not task_id or not to_status or not ts:
+            continue
+        bucket = history.setdefault(task_id, {})
+        if to_status not in bucket:
+            bucket[to_status] = ts
+    return history
+
+
+def _generate_dag_payload(state: dict) -> dict:
+    """Task-dependency DAG for the visualizer: edges, longest-path layering
+    (`layer`, i.e. wave number), lifecycle `stage`, per-task first-reached
+    timestamps, and the precomputed ready set / critical path so the UI
+    doesn't have to recompute graph algorithms client-side.
+    """
+    tasks = state["tasks"]
+    by_id = task_map(state)
+
+    layer_cache: dict[str, int] = {}
+
+    def layer_of(task_id: str) -> int:
+        if task_id not in layer_cache:
+            needs = by_id[task_id]["needs"]
+            layer_cache[task_id] = 0 if not needs else 1 + max(layer_of(dep) for dep in needs)
+        return layer_cache[task_id]
+
+    weight_cache: dict[str, int] = {}
+    critical_parent: dict[str, str | None] = {}
+
+    def weight_of(task_id: str) -> int:
+        if task_id not in weight_cache:
+            task = by_id[task_id]
+            best_dep, best_dep_weight = None, 0
+            for dep in task["needs"]:
+                dep_weight = weight_of(dep)
+                if dep_weight > best_dep_weight:
+                    best_dep, best_dep_weight = dep, dep_weight
+            weight_cache[task_id] = _remaining_stages(task["status"]) + best_dep_weight
+            critical_parent[task_id] = best_dep
+        return weight_cache[task_id]
+
+    for task_id in by_id:
+        layer_of(task_id)
+        weight_of(task_id)
+
+    critical_path: list[str] = []
+    if weight_cache:
+        node = max(weight_cache, key=lambda t: weight_cache[t])
+        while node:
+            critical_path.append(node)
+            node = critical_parent[node]
+        critical_path.reverse()
+
+    history = _task_history(state)
+    dag_tasks = []
+    edges = []
+    ready_ids = []
+    for task in tasks:
+        task_id = task["id"]
+        is_ready = runnable(task, by_id)
+        if is_ready:
+            ready_ids.append(task_id)
+        dag_tasks.append({
+            "id": task_id,
+            "title": task["title"],
+            "owner": task["owner"],
+            "context": task.get("context"),
+            "epic": task.get("epic"),
+            "phase": task["phase"],
+            "status": task["status"],
+            "stage": _task_stage(task["status"]),
+            "needs": task["needs"],
+            "layer": layer_of(task_id),
+            "ready": is_ready,
+            "blocked_reason": task.get("blocked_reason"),
+            "history": history.get(task_id, {}),
+        })
+        for dep in task["needs"]:
+            edges.append({"from": dep, "to": task_id, "unlocked": by_id[dep]["status"] == "done"})
+
+    return {
+        "tasks": dag_tasks,
+        "edges": edges,
+        "waves": (max(layer_cache.values()) + 1) if layer_cache else 0,
+        "ready": ready_ids,
+        "critical_path": critical_path,
+    }
 
 
 def _drift_flags(task: dict) -> dict:
@@ -1607,9 +1736,9 @@ def _write_task_handoff(
     runner_label = f"{runner_name}/{model}" if model else runner_name
     state_flag = f" --state {state_arg}" if state_arg else ""
     instructions = (
-        f"Thực thi task theo acceptance criteria trên. Không vi phạm AGENTS.md. "
-        f"Khi xong, chạy: bash .ai/scripts/ai-kit{state_flag} transition {task['id']} "
-        f"complete --actor {task['owner']} --detail 'Hoàn thành bởi {runner_label}'"
+        f"Execute the task per the acceptance criteria above. Do not violate AGENTS.md. "
+        f"When done, run: bash .ai/scripts/ai-kit{state_flag} transition {task['id']} "
+        f"complete --actor {task['owner']} --detail 'Completed by {runner_label}'"
     )
     handoff = {
         "schema_version": 1,
@@ -1654,14 +1783,18 @@ def cmd_dispatch(args: argparse.Namespace) -> dict:
     if runner.get("input") == "json-file":
         handoff_path = _write_task_handoff(task, args.state, runner_name, runner, selected_model, getattr(args, "agent_id", None))
         handoff_display = display_path(handoff_path)
-        prompt = f"Bạn là {task['owner']}. Đọc và thực thi task JSON tại {handoff_display}. Không vi phạm AGENTS.md. Xong việc gọi lệnh: bash .ai/scripts/ai-kit{state_flag} transition {task['id']} complete --actor {task['owner']} --detail 'Hoàn thành bởi {runner_label}'"
+        prompt = f"You are {task['owner']}. Read and execute the task JSON at {handoff_display}. Do not violate AGENTS.md. When done, run: bash .ai/scripts/ai-kit{state_flag} transition {task['id']} complete --actor {task['owner']} --detail 'Completed by {runner_label}'"
     else:
         tasks_md = display_path(workspace(state_path(args.state)) / "tasks" / "tasks.md")
-        prompt = f"Bạn là {task['owner']}. Thực thi task {task['id']} theo yêu cầu trong {tasks_md}. Không vi phạm AGENTS.md. Xong việc gọi lệnh: bash .ai/scripts/ai-kit{state_flag} transition {task['id']} complete --actor {task['owner']} --detail 'Hoàn thành bởi {runner_label}'"
+        prompt = f"You are {task['owner']}. Execute task {task['id']} per the requirements in {tasks_md}. Do not violate AGENTS.md. When done, run: bash .ai/scripts/ai-kit{state_flag} transition {task['id']} complete --actor {task['owner']} --detail 'Completed by {runner_label}'"
     # Runner templates hold {prompt} unquoted; shlex.quote is the single
     # place quoting happens, so a template can never double-quote it.
     cmd = _render_runner_command(template, prompt, selected_model)
     print(f"Dispatching task {task['id']} to runner '{runner_label}'...", file=sys.stderr)
+    # shell=True is required: `template` is a shell command string from
+    # .ai-config/runners.yaml, not an argv list, so it can't be handed to
+    # subprocess without a shell (see G4 in AGENTS.md: write access to
+    # runners.yaml is equivalent to arbitrary shell execution here).
     result = _sp.run(cmd, shell=True, cwd=str(ROOT), stdin=_sp.DEVNULL)
     # Audit log
     audit = {
@@ -1772,6 +1905,11 @@ def cmd_verify(args: argparse.Namespace) -> dict:
                     continue
                 executed_quality_checks += 1
                 print(f"  Running {key}: {cmd}", file=sys.stderr)
+                # shell=True is required: `cmd` is a shell command string
+                # from .ai-config/kit.yaml (test_command/lint_command/...),
+                # not an argv list -- same G4 threat model as dispatch's
+                # runner command above: treat write access to kit.yaml as
+                # equivalent to arbitrary shell execution.
                 result = _sp.run(cmd, shell=True, cwd=str(ROOT), capture_output=True, text=True)
                 check = {"name": key, "command": cmd, "exit_code": result.returncode, "status": "pass" if result.returncode == 0 else "fail"}
                 if result.returncode != 0:

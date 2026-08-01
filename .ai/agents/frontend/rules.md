@@ -1,4 +1,4 @@
-﻿# Frontend Rules
+# Frontend Rules
 
 - Work only within the task's declared scope.
 - Follow G1 through G5 in AGENTS.md.

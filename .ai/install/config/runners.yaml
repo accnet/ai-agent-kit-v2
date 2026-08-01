@@ -1,3 +1,25 @@
+# Runner profiles for `ai-kit dispatch` / `dispatch-ready` / `pipeline`.
+#
+# SAFETY: `dispatch` runs each command with stdin closed (it never waits for
+# a human to answer a permission prompt), so every command below carries a
+# non-interactive/auto-approve flag (--permission-mode acceptEdits,
+# --auto-approve true, --allow-all-tools, ...) out of necessity -- without
+# one, the runner's first tool-permission prompt would hang or fail with no
+# way to answer it. This means the actual safety control here is NOT
+# per-action confirmation; it's the review/QA gates (G2/G3 in AGENTS.md)
+# that must pass before a dispatched task's work is accepted. Do not point
+# `dispatch`/`dispatch-ready`/`pipeline` at a task or repo where unsupervised,
+# full-tool-access execution by the runner CLI is unacceptable.
+#
+# MAINTENANCE: the model names below are a point-in-time example, tied to
+# whatever each provider's CLI currently supports -- they will go stale.
+# Before relying on a pinned name, check it against the installed CLI's own
+# model list (e.g. `<cli> --help` or its docs) and update this file/its
+# aliases to match what your installed CLI versions actually offer.
+#
+# NOTE: `ai-kit runner add` fully rewrites this file from its in-memory
+# runner list and does not preserve these comments -- re-add them (or copy
+# from `.ai/install/config/runners.yaml`) if you regenerate it that way.
 default_executor: "copilot-cli"
 default_model: "gpt-5.6-luna"
 

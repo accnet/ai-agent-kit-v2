@@ -1,4 +1,4 @@
-﻿---
+---
 name: data-migration
 description: Discipline for any database change — schema OR data (migration, DDL, backfill, seed). Reversible up/down, forward-compatible rollout, and destructive/prod steps gated by user approval. Always requires a plan first.
 version: 0.1.0

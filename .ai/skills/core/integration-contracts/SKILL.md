@@ -1,4 +1,4 @@
-﻿---
+---
 name: integration-contracts
 description: Design reliable contracts with external services, APIs, events, and asynchronous consumers.
 version: 2.0.0
@@ -10,6 +10,9 @@ related: []
 ---
 
 # Skill: integration-contracts
+
+> ⚠️ PLACEHOLDER — not yet written for integration-contracts. The procedure, checklist, and anti-patterns below are the generic kit template, not integration-contracts-specific guidance. Replace them with concrete, actionable content before relying on this skill for a real task.
+
 
 ## Purpose
 Design reliable contracts with external services, APIs, events, and asynchronous consumers.
