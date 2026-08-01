@@ -1,4 +1,4 @@
-﻿---
+---
 name: code-review
 description: Structured review at Gate G3 — check scope, acceptance criteria, security/convention, and residual risk before a feature is marked complete. Use before completion or when reviewing a diff. Records the verdict in .ai-work/tasks/tasks.md and .ai-work/reports/.
 version: 0.2.0

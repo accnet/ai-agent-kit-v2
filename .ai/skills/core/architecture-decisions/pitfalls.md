@@ -1,3 +1,3 @@
-﻿# architecture-decisions Pitfalls
+# architecture-decisions Pitfalls
 
 Do not bypass gates, hide failures, or treat generic advice as project-specific evidence.

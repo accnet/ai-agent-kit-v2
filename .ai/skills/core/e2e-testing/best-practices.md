@@ -1,3 +1,3 @@
-﻿# e2e-testing Best Practices
+# e2e-testing Best Practices
 
 Use the checklist in SKILL.md, keep scope small, and retain reproducible evidence.

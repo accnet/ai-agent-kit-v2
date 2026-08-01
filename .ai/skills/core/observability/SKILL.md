@@ -1,4 +1,4 @@
-﻿---
+---
 name: observability
 description: Make a change observable in production — structured logs, metrics, traces, and an SLO/alert. Use when shipping a feature or fixing an incident so behavior can be seen and alerted on, not guessed.
 version: 0.1.0

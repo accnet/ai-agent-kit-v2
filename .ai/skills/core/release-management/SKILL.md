@@ -1,4 +1,4 @@
-﻿---
+---
 name: release-management
 description: Prepare a verifiable release with compatibility, rollout, rollback, and communication checks.
 version: 2.0.0

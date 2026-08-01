@@ -1,4 +1,4 @@
-﻿# Refactor Workflow
+# Refactor Workflow
 
 1. State the preserved behavior and measurable structural goal.
 2. Characterize existing behavior with tests before changing it.

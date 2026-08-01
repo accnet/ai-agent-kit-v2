@@ -1,4 +1,4 @@
-﻿---
+---
 name: test-and-validation
 description: How to design and run tests — test pyramid, mocking boundaries, mutation checks, and mapping tests to acceptance criteria. Use when writing tests or validating a change. Test CODE lives in the project; commands come from kit.yaml verification.
 version: 0.2.0

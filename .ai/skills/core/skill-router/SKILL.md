@@ -1,4 +1,4 @@
-﻿---
+---
 name: skill-router
 description: Entry router for repo-local skills. Use first on any task to classify intent + size, then select which .ai/skills/ to load and the process to follow. Reads .ai-config/registry.yaml; never loads host-level skills.
 version: 0.2.0

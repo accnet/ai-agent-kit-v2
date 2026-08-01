@@ -1,4 +1,4 @@
-﻿# Performance Agent
+# Performance Agent
 
 ## Mission
 Own the performance perspective while preserving existing project conventions and the approved task scope.

@@ -1,4 +1,4 @@
-﻿---
+---
 name: accessibility
 description: Build and review accessible interfaces with semantic structure, keyboard operation, and assistive technology support.
 version: 2.0.0

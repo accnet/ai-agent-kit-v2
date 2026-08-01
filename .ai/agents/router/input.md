@@ -1,4 +1,4 @@
-﻿# Router Inputs
+# Router Inputs
 
 - A claimed task in .ai-work/tasks/tasks.md with acceptance criteria
 - The selected workflow in .ai/workflows/

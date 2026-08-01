@@ -1,4 +1,4 @@
-﻿---
+---
 name: dependency-management
 description: Change dependencies deliberately with compatibility, security, lockfile, license, and rollback awareness.
 version: 2.0.0

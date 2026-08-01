@@ -1,4 +1,4 @@
-﻿# rag Application Notes
+# rag Application Notes
 
 > ⚠️ PLACEHOLDER — not yet written for rag. This file still holds the generic kit template below, with no rag-specific guidance. Do not treat it as real domain knowledge; replace it with actual rag patterns/pitfalls/examples before relying on it.
 

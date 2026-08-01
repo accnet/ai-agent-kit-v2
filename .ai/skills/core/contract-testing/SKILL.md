@@ -1,4 +1,4 @@
-﻿---
+---
 name: contract-testing
 description: Verify producer-consumer compatibility for public APIs, events, and schemas.
 version: 2.0.0

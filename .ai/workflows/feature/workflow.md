@@ -1,4 +1,4 @@
-﻿# Feature Workflow
+# Feature Workflow
 
 1. Capture goal, scope, and acceptance criteria in .ai-work/tasks/tasks.md.
 2. Inspect relevant architecture and select roles/skills.

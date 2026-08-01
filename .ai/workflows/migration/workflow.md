@@ -1,4 +1,4 @@
-﻿# Migration Workflow
+# Migration Workflow
 
 1. Plan schema/data impact, compatibility window, backup, and rollback.
 2. Require explicit user approval for irreversible operations.

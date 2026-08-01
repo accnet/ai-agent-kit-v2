@@ -1,4 +1,4 @@
-﻿---
+---
 name: e2e-testing
 description: Verify critical user journeys across real boundaries with deterministic environments and fixtures.
 version: 2.0.0

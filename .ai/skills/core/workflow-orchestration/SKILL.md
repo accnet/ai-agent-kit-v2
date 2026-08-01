@@ -1,4 +1,4 @@
-﻿---
+---
 name: workflow-orchestration
 description: Operate multi-agent tasks through ownership, DAG dependencies, evidence, retries, and recovery.
 version: 2.0.0

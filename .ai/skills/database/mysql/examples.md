@@ -1,4 +1,4 @@
-﻿# mysql Application Notes
+# mysql Application Notes
 
 > ⚠️ PLACEHOLDER — not yet written for mysql. This file still holds the generic kit template below, with no mysql-specific guidance. Do not treat it as real domain knowledge; replace it with actual mysql patterns/pitfalls/examples before relying on it.
 

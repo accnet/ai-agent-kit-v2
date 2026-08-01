@@ -1,4 +1,4 @@
-﻿---
+---
 name: performance-profiling
 description: Measure and improve latency, throughput, memory, and query behavior without speculative optimization.
 version: 2.0.0

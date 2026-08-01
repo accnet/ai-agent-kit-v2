@@ -1,4 +1,4 @@
-﻿# Architect Checklist
+# Architect Checklist
 
 - [ ] Task scope and acceptance criteria are understood.
 - [ ] Relevant workflow and skill references were loaded.

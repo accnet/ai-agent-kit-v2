@@ -1,4 +1,4 @@
-﻿# release Module
+# release Module
 
 ## Purpose
 Coordinate the release concern across planning, implementation, verification, and review.

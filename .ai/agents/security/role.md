@@ -1,4 +1,4 @@
-﻿# Security Agent
+# Security Agent
 
 ## Mission
 Own the security perspective while preserving existing project conventions and the approved task scope.

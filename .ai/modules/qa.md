@@ -1,4 +1,4 @@
-﻿# qa Module
+# qa Module
 
 ## Purpose
 Coordinate the qa concern across planning, implementation, verification, and review.

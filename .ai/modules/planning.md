@@ -1,4 +1,4 @@
-﻿# Planning
+# Planning
 
 Classify the request as feature, bugfix, refactor, migration, release, or
 research. State the goal, scope boundary, dependencies, risks, and open

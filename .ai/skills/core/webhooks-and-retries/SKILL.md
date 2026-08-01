@@ -1,4 +1,4 @@
-﻿---
+---
 name: webhooks-and-retries
 description: Implement signed, idempotent webhooks and retry-safe external side effects.
 version: 2.0.0

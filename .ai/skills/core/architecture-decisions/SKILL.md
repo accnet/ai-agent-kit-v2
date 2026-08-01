@@ -1,4 +1,4 @@
-﻿---
+---
 name: architecture-decisions
 description: Capture durable architecture decisions with alternatives, consequences, and review points.
 version: 2.0.0

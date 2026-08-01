@@ -1,4 +1,4 @@
-﻿# security Module
+# security Module
 
 ## Purpose
 Coordinate the security concern across planning, implementation, verification, and review.

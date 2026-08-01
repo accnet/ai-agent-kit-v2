@@ -1,4 +1,4 @@
-﻿---
+---
 name: documentation-maintenance
 description: Keep user, API, operational, and decision documentation synchronized with delivered behavior.
 version: 2.0.0

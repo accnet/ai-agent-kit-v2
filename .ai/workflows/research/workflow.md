@@ -1,4 +1,4 @@
-﻿# Research Workflow
+# Research Workflow
 
 1. Frame the decision, constraints, and success criteria.
 2. Gather primary evidence and inspect the existing codebase.

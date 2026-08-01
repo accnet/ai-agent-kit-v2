@@ -1,4 +1,4 @@
-﻿# performance Module
+# performance Module
 
 ## Purpose
 Coordinate the performance concern across planning, implementation, verification, and review.

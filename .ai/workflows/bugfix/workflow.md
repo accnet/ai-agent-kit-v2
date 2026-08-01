@@ -1,4 +1,4 @@
-﻿# Bugfix Workflow
+# Bugfix Workflow
 
 1. Reproduce the reported behavior and capture expected versus actual results.
 2. Isolate the smallest failing boundary and create a regression test.

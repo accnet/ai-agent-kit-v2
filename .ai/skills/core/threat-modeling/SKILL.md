@@ -1,4 +1,4 @@
-﻿---
+---
 name: threat-modeling
 description: Identify threats, abuse cases, mitigations, and residual risk for a feature before implementation.
 version: 2.0.0

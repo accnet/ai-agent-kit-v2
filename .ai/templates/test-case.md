@@ -1,4 +1,4 @@
-﻿<!-- AI-Kit v2 adaptation of reusable v1 guidance. -->
+<!-- AI-Kit v2 adaptation of reusable v1 guidance. -->
 
 # Test Case — <unit under test>
 

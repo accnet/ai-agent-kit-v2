@@ -43,7 +43,13 @@ fi
 
 for key in test_command typecheck_command build_command lint_command; do
   cmd="$(awk -v key="$key" '$1 == key ":" {sub(/^[^:]*:[[:space:]]*/, ""); print; exit}' .ai-config/kit.yaml)"
-  [[ -n "$cmd" ]] && ok "$key configured: $cmd" || note "$key not configured"
+  # "true" is the kit.yaml sentinel for "no check configured" (ai_kit.py's
+  # cmd_verify skips it rather than running it) -- it is not a real command.
+  if [[ -n "$cmd" && "$cmd" != "true" ]]; then
+    ok "$key configured: $cmd"
+  else
+    note "$key not configured (verify will skip this check)"
+  fi
 done
 
 echo "summary: $fail failure(s), $warn warning(s)"

@@ -1,4 +1,4 @@
-﻿# Planner Agent
+# Planner Agent
 
 ## Mission
 Own the planner perspective while preserving existing project conventions and the approved task scope.

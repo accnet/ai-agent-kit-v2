@@ -1,4 +1,4 @@
-﻿---
+---
 name: integration-contracts
 description: Design reliable contracts with external services, APIs, events, and asynchronous consumers.
 version: 2.0.0

@@ -1,4 +1,4 @@
-﻿# AI-Kit v2 Control Plane
+# AI-Kit v2 Control Plane
 
 The control plane is a dependency-free Python CLI for multi-agent workflow
 coordination. It is intentionally deterministic: Markdown describes work for

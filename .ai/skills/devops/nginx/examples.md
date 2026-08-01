@@ -1,4 +1,4 @@
-﻿# nginx Application Notes
+# nginx Application Notes
 
 > ⚠️ PLACEHOLDER — not yet written for nginx. This file still holds the generic kit template below, with no nginx-specific guidance. Do not treat it as real domain knowledge; replace it with actual nginx patterns/pitfalls/examples before relying on it.
 

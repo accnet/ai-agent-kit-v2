@@ -1,4 +1,4 @@
-﻿# Performance Rules
+# Performance Rules
 
 > ⚠️ PLACEHOLDER — no performance-specific operational guidance has been written yet. Only the shared baseline rules below apply; unlike other roles (see planner/backend/qa/database/frontend/architect/reviewer/researcher/document/release rules.md for the pattern), this role has no Responsibilities/Capabilities/Decision Rules/Escalation section of its own yet.
 

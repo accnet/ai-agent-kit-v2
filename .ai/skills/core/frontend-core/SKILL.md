@@ -1,4 +1,4 @@
-﻿---
+---
 name: frontend-core
 description: Implementation pattern for a UI layer — component (presentation) → state (local/store) → data-fetch (API boundary). Keep components pure, isolate side effects, and cover states (loading/empty/error). Stack-specific (frontend).
 version: 0.1.0

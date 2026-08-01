@@ -1,4 +1,4 @@
-﻿---
+---
 name: api-contract
 description: Discipline for changing a public interface, function signature, or DTO (e.g. adding a required parameter). Use whenever a contract changes, to check impact, keep callers in sync, and record the change. Enforced by tests (Gate G2).
 version: 0.2.0

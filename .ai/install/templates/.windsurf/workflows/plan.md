@@ -1,1 +1,1 @@
-﻿Read and follow `AGENTS.md`; use the v2 workflow engine for plan work.
+Read and follow `AGENTS.md`; use the v2 workflow engine for plan work.
