@@ -18,8 +18,19 @@ sleep 2
 
 echo ""
 echo "🔍 Verifying $TASK_ID..."
-if ! "$AI_KIT" verify "$TASK_ID"; then
-    echo "❌ Verification failed. Stopping here."
+# `ai-kit verify` exits non-zero unless the report says passed (a FAIL, or an
+# INCONCLUSIVE run where no functional check was configured at all). It used to
+# exit 0 regardless, which made this guard a no-op: a task whose checks failed
+# was auto-approved through QA and review and closed at `done`. The report is
+# also re-read below so this stays correct even if the exit contract changes.
+VERIFY_REPORT="$("$AI_KIT" verify "$TASK_ID")" || {
+    echo "$VERIFY_REPORT"
+    echo "❌ Verification did not pass. Stopping here (task stays at implementation-complete)."
+    exit 1
+}
+echo "$VERIFY_REPORT"
+if ! printf '%s' "$VERIFY_REPORT" | grep -q '"passed": true'; then
+    echo "❌ Verification did not pass. Stopping here (task stays at implementation-complete)."
     exit 1
 fi
 

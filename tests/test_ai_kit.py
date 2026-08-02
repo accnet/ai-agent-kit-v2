@@ -923,6 +923,120 @@ class VerificationGateTests(EngineTestCase):
         self.assertNotIn("inconclusive", report)
 
 
+class VerifyExitCodeTests(unittest.TestCase):
+    """`ai-kit verify` must exit non-zero unless the report says passed.
+
+    It used to exit 0 for every verdict, because main() only returns non-zero
+    on EngineError and cmd_verify reports a verdict rather than raising. That
+    made it useless as a shell gate: dispatch-full.sh's
+    `if ! "$AI_KIT" verify ...` never fired, so a task whose checks FAILED was
+    auto-approved through QA and review and closed at `done` -- the same
+    vacuous-gate bug already fixed inside `pipeline`, but in the shell path.
+
+    Driven through the real CLI (subprocess), since the exit code is the whole
+    point and an in-process call to cmd_verify would not exercise it.
+    """
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name)
+        for role in ("planner", "backend", "qa", "reviewer"):
+            (self.root / ".ai" / "agents" / role).mkdir(parents=True, exist_ok=True)
+        (self.root / ".ai" / "workflows" / "feature").mkdir(parents=True, exist_ok=True)
+        (self.root / ".ai" / "engine").mkdir(parents=True, exist_ok=True)
+        (self.root / ".ai" / "engine" / "ai_kit.py").write_bytes(
+            (ENGINE_DIR / "ai_kit.py").read_bytes())
+        (self.root / ".ai-config").mkdir(parents=True, exist_ok=True)
+        self.state = self.root / "work" / "state" / "workflow.json"
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def _run(self, *args: str) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            [sys.executable, str(self.root / ".ai" / "engine" / "ai_kit.py"),
+             "--state", str(self.state), *args],
+            capture_output=True, text=True, cwd=str(self.root),
+        )
+
+    def _prepare(self, verification: str) -> None:
+        (self.root / ".ai-config" / "kit.yaml").write_text(
+            f"project:\n  stack: []\n\nverification:\n{verification}", encoding="utf-8")
+        self._run("init", "--title", "t", "--workflow", "feature", "--actor", "planner")
+        self._run("add-task", "T1", "--title", "t", "--owner", "backend",
+                  "--phase", "build", "--acceptance", "ok")
+        self._run("transition", "T1", "start", "--actor", "backend")
+        self._run("transition", "T1", "complete", "--actor", "backend")
+
+    def test_exits_zero_when_passed(self) -> None:
+        self._prepare("  test_command: exit 0\n  typecheck_command: true\n"
+                      "  build_command: true\n  lint_command: true\n")
+        result = self._run("verify", "T1")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('"passed": true', result.stdout)
+
+    def test_exits_nonzero_when_a_check_fails(self) -> None:
+        self._prepare("  test_command: exit 1\n  typecheck_command: true\n"
+                      "  build_command: true\n  lint_command: true\n")
+        result = self._run("verify", "T1")
+        self.assertNotEqual(result.returncode, 0,
+                            "verify reported FAIL but exited 0; every shell gate on it is a no-op")
+        self.assertIn('"passed": false', result.stdout)
+
+    def test_exits_nonzero_when_inconclusive(self) -> None:
+        """Nothing functional ran, so there is no G2 evidence to proceed on."""
+        self._prepare("  test_command: true\n  typecheck_command: true\n"
+                      "  build_command: true\n  lint_command: true\n")
+        result = self._run("verify", "T1")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('"inconclusive": true', result.stdout)
+
+    def test_report_is_still_printed_in_full_on_failure(self) -> None:
+        """The exit code changed; the stdout contract did not."""
+        self._prepare("  test_command: exit 1\n  typecheck_command: true\n"
+                      "  build_command: true\n  lint_command: true\n")
+        report = json.loads(self._run("verify", "T1").stdout)
+        self.assertEqual(report["task"], "T1")
+        self.assertTrue(report["checks"])
+
+    def test_other_commands_still_exit_zero(self) -> None:
+        """Only verify's exit status is verdict-dependent."""
+        self._prepare("  test_command: exit 1\n  typecheck_command: true\n"
+                      "  build_command: true\n  lint_command: true\n")
+        for command in (("show",), ("ready",), ("status",), ("timeline",)):
+            with self.subTest(command=command[0]):
+                self.assertEqual(self._run(*command).returncode, 0)
+
+
+class LocalScriptContractTests(unittest.TestCase):
+    """The helper scripts in .ai/scripts/ are the kit's local QA surface."""
+
+    SCRIPTS = REPO_ROOT / ".ai" / "scripts"
+
+    def test_new_task_and_next_task_are_not_duplicates(self) -> None:
+        """new-task.sh used to be a byte-for-byte duplicate of next-task.sh:
+        it ran `ai-kit ready`, listing existing work and creating nothing,
+        despite its name."""
+        new_task = (self.SCRIPTS / "new-task.sh").read_text(encoding="utf-8")
+        next_task = (self.SCRIPTS / "next-task.sh").read_text(encoding="utf-8")
+        self.assertNotEqual(new_task, next_task)
+        self.assertIn("add-task", new_task, "new-task.sh should create a task")
+        self.assertIn("ready", next_task, "next-task.sh should list ready work")
+
+    def test_new_task_rejects_missing_arguments(self) -> None:
+        result = subprocess.run(["bash", str(self.SCRIPTS / "new-task.sh"), "T9"],
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("usage:", result.stderr)
+
+    def test_dispatch_full_gates_on_the_verify_verdict(self) -> None:
+        """Guards the fix: the script must not treat verify's output as a
+        pass without checking it."""
+        script = (self.SCRIPTS / "dispatch-full.sh").read_text(encoding="utf-8")
+        self.assertIn('"passed": true', script,
+                      "dispatch-full.sh must inspect the verify verdict, not just its exit code")
+
+
 class RealRegistryTriggerTests(unittest.TestCase):
     """Exercises the REAL .ai-config/registry.yaml and its install-template
     copy, not a synthetic fixture -- because the bug this guards against
