@@ -152,6 +152,7 @@ These concerns are mandatory when their trigger is present:
 | Ship, CI, version, deployment, rollback | Release/DevOps: `release-management`, `github-actions-ci`, `deployment-infra` |
 | UI interaction | Frontend: `accessibility`, `frontend-core` |
 | New or upgraded dependency | DevOps: `dependency-management` |
+| Schema or data change (migration, backfill, seed) | Database: `data-migration` |
 | User, API, operational, or decision documentation | Document: `documentation-maintenance` |
 
 AI trigger routing (registry-backed) is mandatory when matched by task content:

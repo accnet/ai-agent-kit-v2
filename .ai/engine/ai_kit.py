@@ -669,6 +669,40 @@ def _load_skill_metadata(skill_dir: Path) -> dict:
     return metadata
 
 
+def _load_stack_skills() -> dict[str, list[str]]:
+    """Load registry.yaml's `stack_skills:` map of skill path -> stack tags.
+
+    Routing otherwise matches a technology skill only when the skill's own
+    directory name (or its domain) appears in the task's tokens, which leaves
+    every skill whose name differs from its tag unreachable via
+    `kit.yaml project.stack`: `docker-compose-local` declares
+    `stack: [docker, compose]`, `nestjs-core` declares `[nestjs]`, and so on.
+    This section already encodes the intended mapping -- it simply was not
+    read by anything.
+
+    Written in flow style (`name: {path: ..., stack: [a, b]}`), so it needs
+    its own small parser rather than the indented-block reader above.
+    """
+    path = _config_path("registry.yaml")
+    if not path.exists():
+        return {}
+    text = path.read_text(encoding="utf-8")
+    if "stack_skills:" not in text:
+        return {}
+    section = text.split("stack_skills:", 1)[1]
+    mapping: dict[str, list[str]] = {}
+    for line in section.splitlines():
+        if line and not line.startswith((" ", "\t")):
+            break  # next top-level key
+        match = re.match(r"^  (\S+):\s*\{path:\s*([^,}]+),\s*stack:\s*\[([^\]]*)\]\s*\}", line)
+        if match:
+            skill_path = match.group(2).strip().rstrip("/")
+            tags = [tag.strip().lower() for tag in match.group(3).split(",") if tag.strip()]
+            if tags:
+                mapping[skill_path] = tags
+    return mapping
+
+
 def _load_skill_triggers() -> dict[str, dict]:
     triggers = _load_yaml_registry(".ai-config/registry.yaml", "skill_triggers")
     normalized: dict[str, dict] = {}
@@ -1274,15 +1308,20 @@ def cmd_route(args: argparse.Namespace) -> dict:
             continue
         domain_candidates.extend(sorted(path for path in folder.iterdir() if path.is_dir()))
 
+    stack_skills = _load_stack_skills()
     for skill_dir in domain_candidates:
         skill_name = skill_dir.name.lower()
         domain_name = skill_dir.parent.name.lower()
-        should_include = (
-            skill_name in tokens
-            or domain_name in tokens
-        )
-        if should_include:
+        # A skill is in scope when the task's tokens name the skill directly,
+        # name its domain, or match one of the stack tags registry.yaml's
+        # stack_skills declares for it (e.g. `docker`/`compose` selecting
+        # docker-compose-local, whose directory name is neither).
+        declared_tags = stack_skills.get(skill_dir.relative_to(ROOT).as_posix(), [])
+        matched_tags = [tag for tag in declared_tags if tag in tokens]
+        if skill_name in tokens or domain_name in tokens:
             add_technology(skill_dir, f"role-domain:{domain_name}", "role-technology")
+        elif matched_tags:
+            add_technology(skill_dir, f"stack:{','.join(sorted(matched_tags))}", "role-technology")
 
     # Trigger-driven concerns from registry.
     for trigger_id, trigger in trigger_registry.items():
@@ -1868,6 +1907,62 @@ def cmd_graph(args: argparse.Namespace) -> str:
     return "\n".join(lines + ["}"])
 
 
+COMPOSE_FILENAMES = ("docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml")
+
+# Image name fragment -> the technology skill / stack tag it implies. Used to
+# recognize a datastore declared as a Compose service.
+DATASTORE_IMAGES = {
+    "postgres": "postgresql",
+    "postgis": "postgresql",
+    "pgvector": "pgvector",
+    "mysql": "mysql",
+    "mariadb": "mysql",
+    "redis": "redis",
+    "qdrant": "qdrant",
+}
+
+
+def _detect_container_runtime() -> dict:
+    """Detect whether this project runs its services -- notably its database --
+    in containers, by reading the repo rather than asking.
+
+    Whether the database is a Compose service or a host process decides where
+    a migration actually executes (`docker compose exec db ...` vs a direct
+    connection) and which host a connection string should point at. That is
+    discoverable from docker-compose.yml, so it belongs in configuration
+    resolved once at onboard time, not in a question repeated every task.
+    """
+    compose_file = next((name for name in COMPOSE_FILENAMES if (ROOT / name).is_file()), None)
+    runtime: dict = {
+        "dockerfile": (ROOT / "Dockerfile").is_file(),
+        "compose_file": compose_file,
+        "database_in_compose": False,
+        "database_services": [],
+    }
+    if not compose_file:
+        return runtime
+    # Deliberately a shallow scan, not a YAML parse: this only needs to know
+    # which datastore images appear, and the engine ships without PyYAML.
+    text = (ROOT / compose_file).read_text(encoding="utf-8", errors="replace")
+    service = None
+    for line in text.splitlines():
+        name_match = re.match(r"^  ([A-Za-z0-9._-]+):\s*$", line)
+        if name_match:
+            service = name_match.group(1)
+            continue
+        image_match = re.match(r"^\s+image:\s*[\"']?([^\"'\s]+)", line)
+        if image_match and service:
+            image = image_match.group(1).lower()
+            for fragment, tech in DATASTORE_IMAGES.items():
+                if fragment in image:
+                    runtime["database_in_compose"] = True
+                    runtime["database_services"].append(
+                        {"service": service, "image": image_match.group(1), "technology": tech}
+                    )
+                    break
+    return runtime
+
+
 def cmd_onboard(args: argparse.Namespace) -> dict:
     stacks, sources, commands = [], [], {}
     if (ROOT / "package.json").exists():
@@ -1876,8 +1971,17 @@ def cmd_onboard(args: argparse.Namespace) -> dict:
         stacks.extend(["php", "laravel"]); sources.append("app"); commands["test_command"] = "php artisan test"
     if (ROOT / "pyproject.toml").exists() or (ROOT / "requirements.txt").exists():
         stacks.append("python"); sources.append("src"); commands["test_command"] = "pytest -q"
+    runtime = _detect_container_runtime()
+    if runtime["dockerfile"] or runtime["compose_file"]:
+        stacks.append("docker")
+    if runtime["compose_file"]:
+        stacks.append("compose")
+    # Adding the detected datastore to the stack is what actually routes its
+    # technology skill (and docker-compose-local) into database tasks.
+    stacks.extend(entry["technology"] for entry in runtime["database_services"])
     if not stacks: stacks, sources = ["any"], ["."]
-    proposal = {"stack": sorted(set(stacks)), "source_dirs": sorted(set(sources)), "verification": commands}
+    proposal = {"stack": sorted(set(stacks)), "source_dirs": sorted(set(sources)),
+                "verification": commands, "container_runtime": runtime}
     if args.apply:
         manifest = _config_path("kit.yaml")
         backup = manifest.with_suffix(".yaml.bak")

@@ -32,7 +32,7 @@ stack_skills:
   frontend-tailwind: {path: .ai/skills/frontend/tailwind, stack: [tailwind]}
   testing-pytest: {path: .ai/skills/testing/pytest, stack: [pytest, python]}
   testing-playwright: {path: .ai/skills/testing/playwright, stack: [playwright]}
-  database-pgvector: {path: .ai/skills/database/pgvector, stack: [postgresql, pgvector, rag]}
+  database-pgvector: {path: .ai/skills/database/pgvector, stack: [pgvector, rag]}
   database-qdrant: {path: .ai/skills/database/qdrant, stack: [qdrant, rag]}
   devops-terraform: {path: .ai/skills/devops/terraform, stack: [terraform]}
   devops-prometheus: {path: .ai/skills/devops/prometheus, stack: [prometheus, observability]}
@@ -75,6 +75,11 @@ skill_triggers:
     core_skills: ["dependency-management"]
     technology_skills: []
     reason: "New or upgraded dependencies require a dependency-management review pass (AGENTS.md mandatory concerns)."
+  database-change:
+    match: ["migration", "schema change", "alter table", "add column", "drop column", "drop table", "rename column", "backfill", "seed data", "ddl"]
+    core_skills: ["data-migration"]
+    technology_skills: []
+    reason: "Schema and data changes are never a fast path (rules.yaml db_changes_require_plan, AGENTS.md G1) and are frequently destructive (G5). data-migration previously reached only tasks already owned by the database role, so a backend-owned migration task got none of that discipline."
   coordination-handoff:
     match: ["parallel task", "parallel work", "parallel agent", "concurrent task", "concurrent worker", "blocked work", "handoff", "hand-off", "task retry"]
     core_skills: ["workflow-orchestration"]

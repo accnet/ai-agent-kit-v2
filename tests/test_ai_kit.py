@@ -14,6 +14,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import textwrap
 import unittest
 from pathlib import Path
 
@@ -1006,6 +1007,172 @@ class VerifyExitCodeTests(unittest.TestCase):
         for command in (("show",), ("ready",), ("status",), ("timeline",)):
             with self.subTest(command=command[0]):
                 self.assertEqual(self._run(*command).returncode, 0)
+
+
+class ContainerRuntimeDetectionTests(EngineTestCase):
+    """`onboard` resolves where services -- notably the database -- actually
+    run, by reading the repo.
+
+    Whether the database is a Compose service or a host process decides where
+    a migration executes and which host a connection string should point at.
+    That is discoverable, so it belongs in configuration resolved once at
+    onboard time rather than in a question repeated on every task.
+    """
+
+    def _write(self, name: str, body: str) -> None:
+        (self.root / name).write_text(textwrap.dedent(body), encoding="utf-8")
+
+    def test_no_compose_file_reports_no_container_database(self) -> None:
+        runtime = ai_kit._detect_container_runtime()
+        self.assertIsNone(runtime["compose_file"])
+        self.assertFalse(runtime["database_in_compose"])
+        self.assertEqual(runtime["database_services"], [])
+
+    def test_detects_postgres_service_in_compose(self) -> None:
+        self._write("docker-compose.yml", """\
+            services:
+              api:
+                build: .
+              db:
+                image: postgres:16.2
+            """)
+        runtime = ai_kit._detect_container_runtime()
+        self.assertEqual(runtime["compose_file"], "docker-compose.yml")
+        self.assertTrue(runtime["database_in_compose"])
+        self.assertEqual(
+            runtime["database_services"],
+            [{"service": "db", "image": "postgres:16.2", "technology": "postgresql"}],
+        )
+
+    def test_detects_multiple_datastores_and_alternate_filename(self) -> None:
+        self._write("compose.yaml", """\
+            services:
+              store:
+                image: mariadb:11
+              cache:
+                image: redis:7-alpine
+            """)
+        runtime = ai_kit._detect_container_runtime()
+        self.assertEqual(runtime["compose_file"], "compose.yaml")
+        self.assertEqual(
+            sorted(s["technology"] for s in runtime["database_services"]),
+            ["mysql", "redis"],
+        )
+
+    def test_app_only_compose_is_not_reported_as_a_database(self) -> None:
+        self._write("docker-compose.yml", """\
+            services:
+              web:
+                image: nginx:alpine
+            """)
+        runtime = ai_kit._detect_container_runtime()
+        self.assertTrue(runtime["compose_file"])
+        self.assertFalse(runtime["database_in_compose"])
+
+    def test_onboard_puts_detected_runtime_into_the_stack(self) -> None:
+        """The stack is what actually routes skills, so detection is only
+        useful if it lands there."""
+        self._write("docker-compose.yml", """\
+            services:
+              db:
+                image: postgres:16.2
+            """)
+        (self.root / "package.json").write_text('{"name":"x"}', encoding="utf-8")
+        proposal = ai_kit.cmd_onboard(ns(apply=False))
+        self.assertIn("docker", proposal["stack"])
+        self.assertIn("compose", proposal["stack"])
+        self.assertIn("postgresql", proposal["stack"])
+        self.assertTrue(proposal["container_runtime"]["database_in_compose"])
+
+
+class StackSkillsRoutingTests(EngineTestCase):
+    """registry.yaml's `stack_skills:` maps a skill to the stack tags that
+    should select it. Nothing read it, so routing matched a technology skill
+    only by its own directory name or domain -- leaving every skill whose name
+    differs from its tag (docker-compose-local, nestjs-core, react-vite, ...)
+    unreachable through `kit.yaml project.stack`."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        ai_kit.ROOT = REPO_ROOT
+
+    def test_stack_skills_section_is_parsed(self) -> None:
+        mapping = ai_kit._load_stack_skills()
+        self.assertTrue(mapping, "stack_skills parsed as empty; the format likely changed")
+        self.assertEqual(mapping[".ai/skills/devops/docker-compose-local"], ["docker", "compose"])
+
+    def test_tag_selects_a_skill_whose_directory_name_differs(self) -> None:
+        self.init_workflow()
+        self.add_task("T1", title="Set up the local compose stack", owner="devops",
+                      tags=["docker", "compose"])
+        details = ai_kit.cmd_route(ns(state=str(self.state_file), id="T1", explain=False))
+        selected = [d for d in details["skill_details"]
+                    if "docker-compose-local" in d["entrypoint"]]
+        self.assertTrue(selected, f"docker-compose-local not routed: {details['skills']}")
+        self.assertTrue(any(r.startswith("stack:") for r in selected[0]["selection_reasons"]))
+
+    def test_pgvector_is_not_pulled_in_by_plain_postgresql(self) -> None:
+        """pgvector declared `postgresql` as one of its tags, so implementing
+        stack_skills verbatim would hand a Postgres extension to every plain
+        Postgres project."""
+        mapping = ai_kit._load_stack_skills()
+        self.assertNotIn("postgresql", mapping[".ai/skills/database/pgvector"])
+
+
+class DatabaseChangeRoutingTests(EngineTestCase):
+    """data-migration carries the G1 plan requirement and the G5 destructive-op
+    discipline, but had no trigger: it reached only tasks already owned by the
+    database role, so a backend-owned migration task got none of it."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        ai_kit.ROOT = REPO_ROOT
+
+    def _skills(self, title: str, owner: str) -> list[str]:
+        self.add_task(f"T{abs(hash(title)) % 9999}", title=title, owner=owner)
+        task_id = self.last_task_id
+        return ai_kit.cmd_route(ns(state=str(self.state_file), id=task_id, explain=False))["skills"]
+
+    def add_task(self, task_id: str, **kwargs):  # type: ignore[override]
+        self.last_task_id = task_id
+        return super().add_task(task_id, **kwargs)
+
+    def test_backend_owned_migration_task_gets_data_migration(self) -> None:
+        self.init_workflow()
+        skills = self._skills("Add a migration to drop the legacy users table", "backend")
+        self.assertTrue(any("data-migration" in s for s in skills),
+                        f"data-migration not routed to a backend migration task: {skills}")
+
+    def test_backfill_and_seed_also_route(self) -> None:
+        self.init_workflow()
+        for title in ("Backfill the normalized_status column",
+                      "Add seed data for the demo tenant"):
+            with self.subTest(title=title):
+                skills = self._skills(title, "backend")
+                self.assertTrue(any("data-migration" in s for s in skills), skills)
+
+    def test_unrelated_task_does_not_get_data_migration(self) -> None:
+        self.init_workflow()
+        skills = self._skills("Fix a typo in the order confirmation email", "backend")
+        self.assertFalse(any("data-migration" in s for s in skills), skills)
+
+
+class DataMigrationContentTests(unittest.TestCase):
+    """The skill must tell the agent to establish the migration target from the
+    repo rather than assume it (or interrogate the user about it)."""
+
+    SKILL = REPO_ROOT / ".ai" / "skills" / "core" / "data-migration" / "SKILL.md"
+
+    def test_covers_identifying_the_target_database(self) -> None:
+        text = self.SKILL.read_text(encoding="utf-8").lower()
+        for token in ("database_url", "compose", "host and port", "inside the container"):
+            with self.subTest(token=token):
+                self.assertIn(token, text)
+
+    def test_target_confirmation_is_in_the_checklist(self) -> None:
+        text = self.SKILL.read_text(encoding="utf-8").lower()
+        checklist = text.split("## checklist", 1)[1].split("##", 1)[0]
+        self.assertIn("target database identified", checklist)
 
 
 class LocalScriptContractTests(unittest.TestCase):
