@@ -63,11 +63,37 @@ def _load_registry() -> dict:
                 role = match.group(1)
                 domains = [d.strip() for d in match.group(2).split(",") if d.strip()]
                 owners[role] = domains
+            else:
+                # Without this, a role whose domain list wraps onto a second
+                # line simply fails the regex and vanishes from `owners`, so
+                # that role silently routes no technology skills at all.
+                wrapped = re.match(r"\s+(\w+):\s*(.+)$", line)
+                if wrapped:
+                    _reject_unterminated_list(wrapped.group(2).strip(), registry_path, f"owners.{wrapped.group(1)}")
     core_names: list[str] = []
     match = re.search(r"names:\s*\[([^\]]*)\]", text)
     if match:
         core_names = [n.strip() for n in match.group(1).split(",") if n.strip()]
     return {"owners": owners, "core_skills": {"names": core_names}}
+
+
+def _reject_unterminated_list(value: str, source: Path, key: str) -> None:
+    """Fail loudly on a ``[...]`` array wrapped across physical lines.
+
+    Every YAML reader in this engine is line-based (no PyYAML dependency),
+    so a value that opens ``[`` on one line and closes ``]`` on the next is
+    not merely unsupported -- it is silently stored as the first line's raw
+    text, producing a list-shaped field that can never match anything, with
+    no error at load time. That failure mode is invisible: a
+    ``skill_triggers`` entry simply stops firing. Raise instead, naming the
+    file and key, so the author sees it immediately.
+    """
+    if value.startswith("[") and not value.endswith("]"):
+        raise EngineError(
+            f"{display_path(source)}: value for '{key}' opens '[' but does not close ']' on the "
+            f"same line. This engine's YAML readers are line-based, so a multi-line array is "
+            f"silently truncated rather than parsed -- keep the whole list on one line."
+        )
 
 
 def _load_yaml_registry(relative_path: str, top_key: str) -> dict:
@@ -108,6 +134,7 @@ def _load_yaml_registry(relative_path: str, top_key: str) -> dict:
         field_match = re.match(r"^    (\w+):\s*(.+)$", line)
         if field_match and current:
             value = field_match.group(2).strip()
+            _reject_unterminated_list(value, path, f"{current}.{field_match.group(1)}")
             # Registry writers use JSON double-quoted scalars when a value may
             # contain YAML-significant characters (or intentional whitespace).
             # JSON is a strict, dependency-free subset for these scalar values.
@@ -623,6 +650,7 @@ def _load_skill_metadata(skill_dir: Path) -> dict:
         if not line or line.startswith("#") or ":" not in line:
             continue
         key, value = line.split(":", 1)
+        _reject_unterminated_list(value.strip(), meta_path, key.strip())
         fields[key.strip()] = value.strip()
     metadata = dict(defaults)
     metadata["name"] = str(fields.get("name") or metadata["name"]).strip()
@@ -1932,6 +1960,19 @@ def cmd_pipeline(args: argparse.Namespace) -> dict:
 
     print(f"[pipeline] {task['id']}: verifying...", file=sys.stderr)
     report = cmd_verify(argparse.Namespace(state=args.state, id=task["id"]))
+    if report.get("inconclusive"):
+        # Distinct from a failure: nothing broke, nothing was actually checked.
+        # Auto-approving QA and review here would close the task on no
+        # functional evidence at all, which is exactly what G2 exists to prevent.
+        raise EngineError(
+            f"pipeline stopped: verification is inconclusive for {task['id']} — no "
+            f"test/lint/typecheck/build command is configured in .ai-config/kit.yaml, so "
+            f"nothing functional was checked and there is no G2 evidence to auto-approve on. "
+            f"Configure verification ('ai-kit onboard --apply', or edit kit.yaml's verification "
+            f"section), or approve manually with a human-supplied reason "
+            f"('ai-kit approve {task['id']} --role qa --reason ...'). "
+            f"Task remains at implementation-complete."
+        )
     if not report["passed"]:
         raise EngineError(
             f"pipeline stopped: verify failed for {task['id']}; inspect the report above, fix, "
@@ -2172,6 +2213,14 @@ def cmd_verify(args: argparse.Namespace) -> dict:
                     report["passed"] = False
                 report["checks"].append(check)
     if executed_quality_checks == 0:
+        # G2 requires evidence that the acceptance criteria actually hold. With
+        # every verification command left at kit.yaml's 'true' sentinel, nothing
+        # functional ran, so there is no such evidence -- reporting PASS here
+        # would let `pipeline` auto-approve QA, auto-approve review, and close
+        # the task on the strength of a secret-scan alone. Report it as
+        # inconclusive (not passed, but distinguishable from a real failure) so
+        # callers must either configure verification or approve manually with a
+        # human-supplied reason.
         warning = (
             "no test/lint/typecheck/build command is configured in .ai-config/kit.yaml "
             "(all are 'true' or missing) — verify only ran security gates and did "
@@ -2179,6 +2228,8 @@ def cmd_verify(args: argparse.Namespace) -> dict:
             ".ai-config/kit.yaml's verification section for a real project."
         )
         report["warning"] = warning
+        report["inconclusive"] = True
+        report["passed"] = False
         print(f"  WARNING: {warning}", file=sys.stderr)
     gates = ROOT / ".ai" / "scripts" / "check-gates.sh"
     if gates.exists():
@@ -2189,7 +2240,7 @@ def cmd_verify(args: argparse.Namespace) -> dict:
             check["stderr"] = result.stderr[-500:] if result.stderr else ""
             report["passed"] = False
         report["checks"].append(check)
-    verdict = "PASS" if report["passed"] else "FAIL"
+    verdict = "PASS" if report["passed"] else ("INCONCLUSIVE" if report.get("inconclusive") else "FAIL")
     print(f"Verification {verdict}. Use 'ai-kit approve {task['id']} --role qa' to finalize.", file=sys.stderr)
     return report
 

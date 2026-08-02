@@ -818,6 +818,111 @@ class SkillContentTests(unittest.TestCase):
         self.assertEqual(flagged, [], f"Placeholder content found in: {flagged}")
 
 
+class UnterminatedListGuardTests(EngineTestCase):
+    """Every YAML reader here is line-based, so a `[...]` array wrapped onto
+    a second line is not unsupported-but-obvious: it is silently stored as
+    the first line's raw text, and the affected trigger/role simply stops
+    matching with no error. These assert it now raises instead."""
+
+    def _registry(self, body: str) -> None:
+        (self.root / ".ai-config" / "registry.yaml").write_text(body, encoding="utf-8")
+
+    def test_wrapped_trigger_match_list_raises(self) -> None:
+        self._registry(
+            "skill_triggers:\n"
+            "  demo:\n"
+            '    match: ["one", "two",\n'
+            '            "three"]\n'
+            '    core_skills: ["security-review"]\n'
+        )
+        with self.assertRaises(ai_kit.EngineError) as ctx:
+            ai_kit._load_skill_triggers()
+        self.assertIn("demo.match", str(ctx.exception))
+        self.assertIn("one line", str(ctx.exception))
+
+    def test_wrapped_owners_list_raises(self) -> None:
+        """A wrapped owners list used to fail the regex and drop the role
+        entirely, so that role silently routed no technology skills."""
+        self._registry("owners:\n  backend: [backend,\n            database]\n")
+        with self.assertRaises(ai_kit.EngineError) as ctx:
+            ai_kit._load_registry()
+        self.assertIn("owners.backend", str(ctx.exception))
+
+    def test_wrapped_skill_meta_list_raises(self) -> None:
+        skill_dir = self.root / ".ai" / "skills" / "backend" / "demo"
+        skill_dir.mkdir(parents=True, exist_ok=True)
+        (skill_dir / "skill.meta.yaml").write_text(
+            "name: demo\ndomain: backend\ndocuments: [overview.md,\n           patterns.md]\n",
+            encoding="utf-8",
+        )
+        with self.assertRaises(ai_kit.EngineError) as ctx:
+            ai_kit._load_skill_metadata(skill_dir)
+        self.assertIn("documents", str(ctx.exception))
+
+    def test_single_line_lists_still_parse(self) -> None:
+        self._registry(
+            "skill_triggers:\n"
+            "  demo:\n"
+            '    match: ["one", "two", "three"]\n'
+            '    core_skills: ["security-review"]\n'
+        )
+        triggers = ai_kit._load_skill_triggers()
+        self.assertEqual(triggers["demo"]["match"], ["one", "two", "three"])
+
+
+class VerificationGateTests(EngineTestCase):
+    """G2 requires evidence the acceptance criteria hold. With every
+    verification command left at kit.yaml's 'true' sentinel, nothing
+    functional runs -- verify used to report passed=True on the strength of
+    a secret scan alone, which let `pipeline` auto-approve QA, auto-approve
+    review, and close the task with no functional evidence at all."""
+
+    def _kit_yaml(self, verification: str) -> None:
+        (self.root / ".ai-config" / "kit.yaml").write_text(
+            f"project:\n  stack: []\n\nverification:\n{verification}", encoding="utf-8"
+        )
+
+    def _task_at_implementation_complete(self) -> None:
+        self.init_workflow()
+        self.add_task("T1")
+        self.transition("T1", "start", actor="backend")
+        self.transition("T1", "complete", actor="backend")
+
+    def test_no_configured_checks_is_inconclusive_not_passed(self) -> None:
+        self._kit_yaml(
+            "  test_command: true\n  typecheck_command: true\n"
+            "  build_command: true\n  lint_command: true\n"
+        )
+        self._task_at_implementation_complete()
+        report = ai_kit.cmd_verify(ns(state=str(self.state_file), id="T1"))
+        self.assertFalse(report["passed"])
+        self.assertTrue(report["inconclusive"])
+        self.assertIn("warning", report)
+        self.assertTrue(all(c["status"] == "skipped" for c in report["checks"]
+                            if c["name"].endswith("_command")))
+
+    def test_a_configured_passing_check_is_conclusive(self) -> None:
+        self._kit_yaml(
+            "  test_command: true\n  typecheck_command: true\n"
+            "  build_command: true\n  lint_command: exit 0\n"
+        )
+        self._task_at_implementation_complete()
+        report = ai_kit.cmd_verify(ns(state=str(self.state_file), id="T1"))
+        self.assertTrue(report["passed"])
+        self.assertNotIn("inconclusive", report)
+
+    def test_a_configured_failing_check_fails_not_inconclusive(self) -> None:
+        """A real failure must stay distinguishable from 'nothing ran'."""
+        self._kit_yaml(
+            "  test_command: exit 1\n  typecheck_command: true\n"
+            "  build_command: true\n  lint_command: true\n"
+        )
+        self._task_at_implementation_complete()
+        report = ai_kit.cmd_verify(ns(state=str(self.state_file), id="T1"))
+        self.assertFalse(report["passed"])
+        self.assertNotIn("inconclusive", report)
+
+
 class RealRegistryTriggerTests(unittest.TestCase):
     """Exercises the REAL .ai-config/registry.yaml and its install-template
     copy, not a synthetic fixture -- because the bug this guards against

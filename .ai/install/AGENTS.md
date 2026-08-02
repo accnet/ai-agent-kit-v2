@@ -54,6 +54,18 @@ until the orchestration components below have executable interfaces, durable
 state transitions, and automated tests. Do not describe a prompt convention as
 an engine capability without this evidence.
 
+That last rule is enforced, not merely stated: `tests/test_agents_conformance.py`
+parses the routing tables in this file and fails if any row is not actually
+reachable through `.ai-config/registry.yaml`. Adding a row here without a
+trigger behind it breaks the build. Extend the tests when adding a normative
+table, so the claim and the implementation cannot drift apart.
+
+Skill documents are tiered by depth on purpose (see README's "Skill depth is
+tiered on purpose"). Most technology skills are short guardrails that stop
+known mistakes, not tutorials; a few carry full worked references. Judge a
+skill by whether every line is specific and actionable, never by its length or
+by how many files a directory contains.
+
 Prefer the smallest change that makes one capability reliably usable. Add a
 new agent, skill, workflow, or automation only when it has a concrete owner,
 trigger, interface, and verification path.
