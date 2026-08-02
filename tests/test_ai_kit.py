@@ -168,6 +168,63 @@ class StateMachineTests(EngineTestCase):
         self.assertEqual(ready_ids, set())
 
 
+class ShowTaskDetailTests(EngineTestCase):
+    """`ai-kit show <id>` is the CLI's advertised way to debug a stuck
+    lifecycle, so it must resolve one task's full detail -- not just dump
+    the whole state (that stays available via `ai-kit show` with no id)."""
+
+    def test_no_id_still_returns_whole_state(self) -> None:
+        self.init_workflow()
+        self.add_task("T1")
+        result = ai_kit.cmd_show(ns(state=str(self.state_file), id=None))
+        self.assertIn("tasks", result)
+        self.assertIn("events", result)
+
+    def test_unknown_id_raises(self) -> None:
+        self.init_workflow()
+        self.add_task("T1")
+        with self.assertRaises(ai_kit.EngineError):
+            ai_kit.cmd_show(ns(state=str(self.state_file), id="T99"))
+
+    def test_known_id_returns_task_deps_acceptance_evidence_and_events(self) -> None:
+        self.init_workflow()
+        self.add_task("T1")
+        self.add_task("T2", needs=["T1"])
+        self.transition("T1", "start", actor="backend")
+        self.transition("T1", "complete", actor="backend")
+        self.transition("T1", "qa-pass", actor="qa", evidence=[self.qa_evidence("T1")])
+        self.transition("T1", "review-approve", actor="reviewer", evidence=[self.review_evidence("T1")])
+        self.transition("T1", "close", actor="reviewer")
+
+        result = ai_kit.cmd_show(ns(state=str(self.state_file), id="T1"))
+        self.assertEqual(result["task"]["id"], "T1")
+        self.assertEqual(result["task"]["status"], "done")
+        self.assertEqual(result["needs"], [])
+        self.assertEqual([d["id"] for d in result["dependents"]], ["T2"])
+        self.assertEqual(result["acceptance"], ["T1 works"])
+        self.assertTrue(result["evidence"])
+        self.assertIn("drift", result)
+        self.assertTrue(result["events"], "expected T1's own transitions in its event history")
+        self.assertTrue(all(e["task"] == "T1" for e in result["events"]))
+        self.assertLessEqual(len(result["events_recent"]), 10)
+
+    def test_needs_resolves_dependency_status(self) -> None:
+        self.init_workflow()
+        self.add_task("T1")
+        self.add_task("T2", needs=["T1"])
+        result = ai_kit.cmd_show(ns(state=str(self.state_file), id="T2"))
+        self.assertEqual(result["needs"], [{"id": "T1", "title": "Task T1", "status": "todo"}])
+
+    def test_cli_accepts_task_id(self) -> None:
+        """Reproduces the reported bug: `ai-kit show T1` must not be
+        rejected as an unrecognized argument."""
+        self.init_workflow()
+        self.add_task("T1")
+        args = ai_kit.parser().parse_args(["--state", str(self.state_file), "show", "T1"])
+        result = args.fn(args)
+        self.assertEqual(result["task"]["id"], "T1")
+
+
 class SeparationOfDutiesTests(EngineTestCase):
     def test_executor_cannot_qa_pass_own_work(self) -> None:
         self.init_workflow()

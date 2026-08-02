@@ -3134,8 +3134,43 @@ def cmd_verify(args: argparse.Namespace) -> dict:
 
 
 def cmd_show(args: argparse.Namespace) -> dict:
+    """Show the whole workflow state, or a single task's full detail.
+
+    `ai-kit show` (no id) keeps its original whole-state dump for scripts
+    that already depend on it. `ai-kit show <id>` is the debugging entry
+    point advertised by the CLI: it resolves the task plus its dependency
+    graph (both directions), acceptance criteria, evidence, drift flags, and
+    its own event history in one call, so a user debugging a stuck lifecycle
+    does not have to cross-reference `timeline`/`drift`/`graph` by hand.
+    """
     state = load(state_path(args.state)); validate(state); sync_phases(state)
-    return state
+    task_id = getattr(args, "id", None)
+    if not task_id:
+        return state
+    tasks = task_map(state)
+    task = tasks.get(task_id)
+    if not task:
+        raise EngineError(f"unknown task: {task_id}")
+    needs = [
+        {"id": dep, "title": tasks[dep]["title"], "status": tasks[dep]["status"]}
+        if dep in tasks else {"id": dep, "title": None, "status": "unknown"}
+        for dep in task.get("needs", [])
+    ]
+    dependents = [
+        {"id": other["id"], "title": other["title"], "status": other["status"]}
+        for other in state["tasks"] if task_id in other.get("needs", [])
+    ]
+    events = [e for e in state["events"] if e.get("task") == task_id]
+    return {
+        "task": task,
+        "needs": needs,
+        "dependents": dependents,
+        "acceptance": task.get("acceptance", []),
+        "evidence": task.get("evidence", []),
+        "drift": _drift_flags(task),
+        "events": events,
+        "events_recent": events[-10:],
+    }
 
 
 def parser() -> argparse.ArgumentParser:
@@ -3178,7 +3213,7 @@ def parser() -> argparse.ArgumentParser:
     analyze = sub.add_parser("analyze"); analyze.set_defaults(fn=cmd_analyze)
     architecture = sub.add_parser("architecture"); architecture_sub = architecture.add_subparsers(dest="architecture_command", required=True)
     architecture_discover = architecture_sub.add_parser("discover"); architecture_discover.set_defaults(fn=cmd_architecture_discover)
-    show = sub.add_parser("show"); show.set_defaults(fn=cmd_show)
+    show = sub.add_parser("show"); show.add_argument("id", nargs="?", help="task id to show full detail for; omit to dump the whole workflow state"); show.set_defaults(fn=cmd_show)
     valid = sub.add_parser("validate"); valid.set_defaults(fn=lambda args: (validate(load(state_path(args.state))) or {"valid": True}))
     return root
 
