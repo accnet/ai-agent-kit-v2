@@ -2297,6 +2297,15 @@ def main() -> int:
     try:
         output = args.fn(args)
         print(output if isinstance(output, str) else json.dumps(output, indent=2))
+        # `verify` reports a verdict rather than raising, so returning 0
+        # unconditionally made it useless as a shell gate: dispatch-full.sh's
+        # `if ! ai-kit verify ...` never fired, and a task whose checks FAILED
+        # was auto-approved through QA and review and closed. The full report
+        # is still printed either way; only the exit status changes, so a
+        # caller reading stdout is unaffected while `if !`/`&&`/`set -e` now
+        # behave the way any shell author would assume.
+        if isinstance(output, dict) and args.fn is cmd_verify and not output.get("passed"):
+            return 1
         return 0
     except EngineError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
