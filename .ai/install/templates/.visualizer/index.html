@@ -106,6 +106,13 @@
           Modules
           <span class="sb-count" id="modCount">0</span>
         </div>
+        <div class="mod-filter-bar" id="modFilterBar">
+          <button class="chip on" data-src-filter="all">All</button>
+          <button class="chip" data-src-filter="declared">Declared</button>
+          <button class="chip" data-src-filter="discovered">Discovered</button>
+        </div>
+        <select id="ownerFilterSel" class="mod-filter-select"><option value="all">All owners</option></select>
+        <select id="contextFilterSel" class="mod-filter-select"><option value="all">All contexts</option></select>
         <div class="mod-tree" id="modTree"></div>
       </div>
     </aside>

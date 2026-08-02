@@ -37,12 +37,41 @@ python .ai/engine/ai_kit.py epic add checkout-revamp --spec .ai-work/plan/checko
 python .ai/engine/ai_kit.py drift T3
 python .ai/engine/ai_kit.py board --context ordering --format markdown --write
 python .ai/engine/ai_kit.py visualizer generate
+python .ai/engine/ai_kit.py architecture discover
 ```
 
 `visualizer generate` exports the current board, module architecture, context
-impact, and the last 200 runtime events into `.visualizer/`. The same export is
-automatically regenerated after every state-mutating command (`init`,
-`add-task`, `update-task`, `transition`, and `plan`).
+impact, the last 200 runtime events, and the discovered feature-module
+architecture into `.visualizer/`. The same export is automatically
+regenerated after every state-mutating command (`init`, `add-task`,
+`update-task`, `transition`, and `plan`).
+
+`architecture discover` is a read-only scan of the project's source tree that
+finds feature-level modules the declared `.ai-config/contexts.yaml` bounded
+contexts don't name individually (NestJS `*.module.ts` folders, React
+`src/{pages,components,features,services,contexts}`, Python packages with
+`__init__.py`, and a generic first/second-level fallback), and attempts to
+detect internal dependency edges from same-language relative imports. It
+never edits `contexts.yaml` or any source file. Declared contexts stay
+authoritative: a discovered module whose path falls inside a declared
+context's glob is linked to it as a child (`parent`) rather than treated as
+an unrelated module, and every module is tagged `"source": "declared"` or
+`"source": "discovered"` plus a `confidence` for discovered entries. The
+command writes `.visualizer/discovered-architecture.json` (its own
+`schema_version`, separate from `architecture.json`'s shape) and records
+anything it cannot resolve safely -- a missing source root, a dependency
+pointing at a module that doesn't exist, a duplicate module path, a module
+with no owner, or a discovered module outside every bounded context -- as a
+`warnings` entry rather than guessing. It only exits non-zero for a
+structurally invalid `contexts.yaml` entry (e.g. a non-string `path`);
+everything else degrades to a partial result with warnings. Source
+directories to scan can be configured via `project.source_dirs` in
+`.ai-config/kit.yaml`; `.git`, `node_modules`, `dist`, `build`,
+`__pycache__`, and other build/runtime directories are always skipped.
+`.visualizer/app.js` fetches `discovered-architecture.json` independently
+and falls back to the declared-only `architecture.json` view when the file
+is absent, so this capability is additive and never a breaking change to
+`ai-kit context list`, `context impact`, `route`, or `pipeline`.
 
 `complete` means implementation complete. A task becomes `done` only after
 `qa-pass`, `review-approve`, and `close`. QA and review actions require an

@@ -120,6 +120,7 @@ the engine actually writes.
 | Runtime Observer | Append-only audit trail of every state transition | `.ai-work/logs/events.jsonl`, surfaced as `.visualizer/events.json` by `ai-kit visualizer generate` |
 | Scheduler Advisor | What can run now vs. what is blocked and why | `ai-kit ready`, `ai-kit blocked`, `ai-kit dispatch-ready` |
 | Architecture / Module Graph | Module ownership and dependency graph from declared contexts | `ai-kit context list` -> `.visualizer/architecture.json` |
+| Architecture Discovery | Read-only scan of the source tree for feature modules (NestJS/React/Python/generic) and internal import-based dependency edges, layered under declared contexts as parent/child, never mutating `contexts.yaml` | `ai-kit architecture discover` -> `.visualizer/discovered-architecture.json` |
 
 This map only lists capabilities with a working command behind them today. A
 role above this table without a row here (Planner, Reviewer, QA, Memory
@@ -134,7 +135,32 @@ declares -- it is not a language-aware source parser, and does not extract
 entities, API shapes, or call graphs from arbitrary code. A project that
 never registers any contexts gets an empty graph, not a fallback scan of its
 source tree; widening this into real code analysis is a new, separately
-tested capability, not a quiet extension of `cmd_analyze`.
+tested capability (`ai-kit architecture discover`, below), not a quiet
+extension of `cmd_analyze`.
+
+`architecture discover` is that separate, read-only capability. It scans the
+configured source tree (`project.source_dirs` in `.ai-config/kit.yaml`, or
+the repo root) for feature-level modules using framework conventions
+(NestJS `*.module.ts`, React `src/{pages,components,features,services,
+contexts}`, Python packages with `__init__.py`, and a generic first/second
+-level fallback), attempts to detect internal dependency edges from
+same-language relative imports, and writes the result to its own
+`.visualizer/discovered-architecture.json` artifact. Contexts declared in
+`.ai-config/contexts.yaml` remain the authoritative bounded contexts and are
+never edited by discovery; a discovered module whose path falls inside a
+declared context's glob is linked to it as a child (`parent` field) instead
+of being treated as an unrelated top-level module. Anything discovery cannot
+determine with confidence (unowned modules, dependencies pointing at a
+module that does not exist, duplicate module paths, an unreachable source
+root, a module with no owner or no related task) is recorded as a warning in
+the artifact rather than guessed at or silently dropped. The command only
+raises a hard error (non-zero exit) for a structurally invalid `contexts.yaml`
+entry (for example a non-string `path`); everything else degrades to a
+partial result with warnings. `.visualizer/app.js` fetches this artifact
+independently of `architecture.json` and falls back to the declared-only
+view when the file is absent, so existing consumers of `architecture.json`,
+`ai-kit context list`, `context impact`, `visualizer generate`, `route`, and
+`pipeline` are unaffected.
 
 ### Artifact Schema Versioning
 
@@ -156,6 +182,11 @@ misreading a renamed or retyped field:
   `.visualizer/app.js` and `.visualizer/dag.html` read directly (pinned by
   `tests/test_visualizer_contract.py`), and mixing a `schema_version` key
   into one of those dicts would be misread as a task, module, or column.
+- `.visualizer/discovered-architecture.json` is the one exception: it is a
+  new, self-contained artifact (not keyed by task/module/context id), so it
+  carries its own top-level `schema_version` field the same way the
+  handoff JSON does, in addition to being listed in
+  `VISUALIZER_ARTIFACT_VERSIONS`/`artifacts.json` like every other payload.
 
 Bump the relevant version only when a payload's top-level shape changes in
 a way a consumer must know about (a field added, removed, or retyped) --
