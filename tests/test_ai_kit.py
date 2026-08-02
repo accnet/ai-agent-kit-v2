@@ -14,6 +14,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import textwrap
 import unittest
 from pathlib import Path
 
@@ -454,6 +455,65 @@ class DagPayloadTests(EngineTestCase):
         by_id = {t["id"]: t for t in dag["tasks"]}
         self.assertEqual(by_id["T3"]["layer"], 2)
         self.assertEqual(dag["waves"], 3)
+
+
+class VisualizerManifestTests(EngineTestCase):
+    """.visualizer/artifacts.json is the schema-version manifest a consumer
+    checks before parsing board/architecture/impact/events/dag.json -- see
+    AGENTS.md's 'Artifact Schema Versioning'. Unlike EngineTestCase's default
+    VISUALIZER_DIR (deliberately nonexistent so most tests never touch disk),
+    these tests point it at a real temp directory to exercise the actual
+    write path."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        ai_kit.VISUALIZER_DIR = self.root / ".visualizer"
+        ai_kit.VISUALIZER_DIR.mkdir(parents=True, exist_ok=True)
+
+    def _manifest(self) -> dict:
+        return json.loads((ai_kit.VISUALIZER_DIR / "artifacts.json").read_text(encoding="utf-8"))
+
+    def test_manifest_written_when_no_workflow_state_exists_yet(self) -> None:
+        ai_kit._generate_visualizer_data(str(self.state_file))
+        manifest = self._manifest()
+        self.assertEqual(manifest["schema_version"], ai_kit.VISUALIZER_MANIFEST_SCHEMA_VERSION)
+        self.assertEqual(manifest["artifacts"], ai_kit.VISUALIZER_ARTIFACT_VERSIONS)
+
+    def test_manifest_written_alongside_real_payloads(self) -> None:
+        self.init_workflow()
+        self.add_task("T0")
+        payloads = ai_kit._generate_visualizer_data(str(self.state_file))
+        self.assertIn("artifacts.json", payloads)
+        manifest = self._manifest()
+        self.assertEqual(manifest["artifacts"], ai_kit.VISUALIZER_ARTIFACT_VERSIONS)
+
+    def test_manifest_lists_exactly_the_other_generated_payloads(self) -> None:
+        """Every artifact the manifest names must be a file the generator
+        actually writes, and vice versa -- otherwise the manifest could drift
+        from reality on either side."""
+        self.init_workflow()
+        payloads = ai_kit._generate_visualizer_data(str(self.state_file))
+        written = set(payloads) - {"artifacts.json"}
+        self.assertEqual(written, set(ai_kit.VISUALIZER_ARTIFACT_VERSIONS))
+
+    def test_validator_rejects_missing_schema_version(self) -> None:
+        with self.assertRaises(ai_kit.EngineError):
+            ai_kit._validate_visualizer_manifest({"artifacts": {"dag.json": 1}})
+
+    def test_validator_rejects_non_int_schema_version(self) -> None:
+        with self.assertRaises(ai_kit.EngineError):
+            ai_kit._validate_visualizer_manifest({"schema_version": "1", "artifacts": {"dag.json": 1}})
+
+    def test_validator_rejects_empty_artifacts(self) -> None:
+        with self.assertRaises(ai_kit.EngineError):
+            ai_kit._validate_visualizer_manifest({"schema_version": 1, "artifacts": {}})
+
+    def test_validator_rejects_non_int_artifact_version(self) -> None:
+        with self.assertRaises(ai_kit.EngineError):
+            ai_kit._validate_visualizer_manifest({"schema_version": 1, "artifacts": {"dag.json": "1"}})
+
+    def test_validator_accepts_the_real_manifest(self) -> None:
+        ai_kit._validate_visualizer_manifest(ai_kit._visualizer_manifest())
 
 
 class RoutingAndSkillMetadataTests(EngineTestCase):
@@ -1008,6 +1068,254 @@ class VerifyExitCodeTests(unittest.TestCase):
                 self.assertEqual(self._run(*command).returncode, 0)
 
 
+class ContainerRuntimeDetectionTests(EngineTestCase):
+    """`onboard` resolves where services -- notably the database -- actually
+    run, by reading the repo.
+
+    Whether the database is a Compose service or a host process decides where
+    a migration executes and which host a connection string should point at.
+    That is discoverable, so it belongs in configuration resolved once at
+    onboard time rather than in a question repeated on every task.
+    """
+
+    def _write(self, name: str, body: str) -> None:
+        (self.root / name).write_text(textwrap.dedent(body), encoding="utf-8")
+
+    def test_no_compose_file_reports_no_container_database(self) -> None:
+        runtime = ai_kit._detect_container_runtime()
+        self.assertIsNone(runtime["compose_file"])
+        self.assertFalse(runtime["database_in_compose"])
+        self.assertEqual(runtime["database_services"], [])
+
+    def test_detects_postgres_service_in_compose(self) -> None:
+        self._write("docker-compose.yml", """\
+            services:
+              api:
+                build: .
+              db:
+                image: postgres:16.2
+            """)
+        runtime = ai_kit._detect_container_runtime()
+        self.assertEqual(runtime["compose_file"], "docker-compose.yml")
+        self.assertTrue(runtime["database_in_compose"])
+        self.assertEqual(
+            runtime["database_services"],
+            [{"service": "db", "image": "postgres:16.2", "technology": "postgresql"}],
+        )
+
+    def test_detects_multiple_datastores_and_alternate_filename(self) -> None:
+        self._write("compose.yaml", """\
+            services:
+              store:
+                image: mariadb:11
+              cache:
+                image: redis:7-alpine
+            """)
+        runtime = ai_kit._detect_container_runtime()
+        self.assertEqual(runtime["compose_file"], "compose.yaml")
+        self.assertEqual(
+            sorted(s["technology"] for s in runtime["database_services"]),
+            ["mysql", "redis"],
+        )
+
+    def test_app_only_compose_is_not_reported_as_a_database(self) -> None:
+        self._write("docker-compose.yml", """\
+            services:
+              web:
+                image: nginx:alpine
+            """)
+        runtime = ai_kit._detect_container_runtime()
+        self.assertTrue(runtime["compose_file"])
+        self.assertFalse(runtime["database_in_compose"])
+
+    def test_onboard_puts_detected_runtime_into_the_stack(self) -> None:
+        """The stack is what actually routes skills, so detection is only
+        useful if it lands there."""
+        self._write("docker-compose.yml", """\
+            services:
+              db:
+                image: postgres:16.2
+            """)
+        (self.root / "package.json").write_text('{"name":"x"}', encoding="utf-8")
+        proposal = ai_kit.cmd_onboard(ns(apply=False))
+        self.assertIn("docker", proposal["stack"])
+        self.assertIn("compose", proposal["stack"])
+        self.assertIn("postgresql", proposal["stack"])
+        self.assertTrue(proposal["container_runtime"]["database_in_compose"])
+
+
+class ProjectAnalyzerTests(EngineTestCase):
+    """`ai-kit analyze` (Project Analyzer + Knowledge Graph Builder): a
+    read-only snapshot combining onboard's stack/runtime detection with the
+    module/ownership graph declared in contexts.yaml, plus static-analysis
+    risk signals. Deliberately scoped to what contexts.yaml declares -- not a
+    language-aware code analyzer."""
+
+    def _add_context(self, name: str, path: str = "src/*", owner: str = "backend",
+                      depends_on: list[str] | None = None, force: bool = False) -> dict:
+        return ai_kit.cmd_context_add(argparse.Namespace(
+            state=str(self.state_file), name=name, path=path, owner=owner,
+            depends_on=depends_on, force=force,
+        ))
+
+    def _analyze(self) -> dict:
+        return ai_kit.cmd_analyze(ns(state=str(self.state_file)))
+
+    def test_empty_registry_yields_empty_graph_with_no_risks(self) -> None:
+        summary = self._analyze()
+        self.assertEqual(summary["modules"], {})
+        self.assertEqual(summary["ownership"], {})
+        self.assertEqual(summary["schema_version"], ai_kit.ANALYZE_SCHEMA_VERSION)
+
+    def test_modules_and_ownership_reflect_registered_contexts(self) -> None:
+        self._add_context("ordering", path="src/ordering/*", owner="backend")
+        self._add_context("ui", path="src/ui/*", owner="frontend")
+        summary = self._analyze()
+        self.assertEqual(summary["modules"]["ordering"]["owner"], "backend")
+        self.assertEqual(summary["modules"]["ordering"]["path"], "src/ordering/*")
+        self.assertEqual(summary["ownership"]["backend"], ["ordering"])
+        self.assertEqual(summary["ownership"]["frontend"], ["ui"])
+
+    def test_dependency_appears_in_module_graph(self) -> None:
+        self._add_context("core", owner="backend")
+        self._add_context("api", owner="backend", depends_on=["core"])
+        summary = self._analyze()
+        self.assertEqual(summary["modules"]["api"]["depends_on"], ["core"])
+        self.assertEqual(summary["risks"], [
+            {"kind": "no_verification_command",
+             "detail": "no test/lint/build command detected; verify will report inconclusive"},
+        ])
+
+    def test_unowned_context_is_flagged_as_a_risk(self) -> None:
+        path = self.root / ".ai-config" / "contexts.yaml"
+        path.write_text("contexts:\n  legacy:\n    path: legacy/*\n", encoding="utf-8")
+        summary = self._analyze()
+        risk_kinds = {r["kind"] for r in summary["risks"]}
+        self.assertIn("unowned_context", risk_kinds)
+
+    def test_dangling_dependency_is_flagged_as_a_risk(self) -> None:
+        """cmd_context_add's own cycle/existence checks stop this via the
+        CLI, but contexts.yaml is a hand-editable YAML file, so a
+        static-analysis pass must catch a dependency left dangling by a
+        manual edit -- not assume the registry was only ever built through
+        the CLI."""
+        path = self.root / ".ai-config" / "contexts.yaml"
+        path.write_text(
+            "contexts:\n  api:\n    path: src/api/*\n    owner: backend\n"
+            "    depends_on: [ghost]\n",
+            encoding="utf-8",
+        )
+        summary = self._analyze()
+        dangling = [r for r in summary["risks"] if r["kind"] == "dangling_dependency"]
+        self.assertEqual(len(dangling), 1)
+        self.assertEqual(dangling[0]["context"], "api")
+
+    def test_missing_verification_command_is_flagged_as_a_risk(self) -> None:
+        summary = self._analyze()
+        self.assertTrue(any(r["kind"] == "no_verification_command" for r in summary["risks"]))
+
+    def test_summary_is_persisted_under_the_workspace(self) -> None:
+        self._analyze()
+        written = json.loads((self.root / "work" / "analysis" / "project-summary.json").read_text(encoding="utf-8"))
+        self.assertEqual(written["schema_version"], ai_kit.ANALYZE_SCHEMA_VERSION)
+
+    def test_stack_and_container_runtime_come_from_onboard_detection(self) -> None:
+        (self.root / "package.json").write_text('{"name":"x"}', encoding="utf-8")
+        summary = self._analyze()
+        self.assertIn("node", summary["stack"])
+        self.assertIn("dockerfile", summary["container_runtime"])
+
+
+class StackSkillsRoutingTests(EngineTestCase):
+    """registry.yaml's `stack_skills:` maps a skill to the stack tags that
+    should select it. Nothing read it, so routing matched a technology skill
+    only by its own directory name or domain -- leaving every skill whose name
+    differs from its tag (docker-compose-local, nestjs-core, react-vite, ...)
+    unreachable through `kit.yaml project.stack`."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        ai_kit.ROOT = REPO_ROOT
+
+    def test_stack_skills_section_is_parsed(self) -> None:
+        mapping = ai_kit._load_stack_skills()
+        self.assertTrue(mapping, "stack_skills parsed as empty; the format likely changed")
+        self.assertEqual(mapping[".ai/skills/devops/docker-compose-local"], ["docker", "compose"])
+
+    def test_tag_selects_a_skill_whose_directory_name_differs(self) -> None:
+        self.init_workflow()
+        self.add_task("T1", title="Set up the local compose stack", owner="devops",
+                      tags=["docker", "compose"])
+        details = ai_kit.cmd_route(ns(state=str(self.state_file), id="T1", explain=False))
+        selected = [d for d in details["skill_details"]
+                    if "docker-compose-local" in d["entrypoint"]]
+        self.assertTrue(selected, f"docker-compose-local not routed: {details['skills']}")
+        self.assertTrue(any(r.startswith("stack:") for r in selected[0]["selection_reasons"]))
+
+    def test_pgvector_is_not_pulled_in_by_plain_postgresql(self) -> None:
+        """pgvector declared `postgresql` as one of its tags, so implementing
+        stack_skills verbatim would hand a Postgres extension to every plain
+        Postgres project."""
+        mapping = ai_kit._load_stack_skills()
+        self.assertNotIn("postgresql", mapping[".ai/skills/database/pgvector"])
+
+
+class DatabaseChangeRoutingTests(EngineTestCase):
+    """data-migration carries the G1 plan requirement and the G5 destructive-op
+    discipline, but had no trigger: it reached only tasks already owned by the
+    database role, so a backend-owned migration task got none of it."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        ai_kit.ROOT = REPO_ROOT
+
+    def _skills(self, title: str, owner: str) -> list[str]:
+        self.add_task(f"T{abs(hash(title)) % 9999}", title=title, owner=owner)
+        task_id = self.last_task_id
+        return ai_kit.cmd_route(ns(state=str(self.state_file), id=task_id, explain=False))["skills"]
+
+    def add_task(self, task_id: str, **kwargs):  # type: ignore[override]
+        self.last_task_id = task_id
+        return super().add_task(task_id, **kwargs)
+
+    def test_backend_owned_migration_task_gets_data_migration(self) -> None:
+        self.init_workflow()
+        skills = self._skills("Add a migration to drop the legacy users table", "backend")
+        self.assertTrue(any("data-migration" in s for s in skills),
+                        f"data-migration not routed to a backend migration task: {skills}")
+
+    def test_backfill_and_seed_also_route(self) -> None:
+        self.init_workflow()
+        for title in ("Backfill the normalized_status column",
+                      "Add seed data for the demo tenant"):
+            with self.subTest(title=title):
+                skills = self._skills(title, "backend")
+                self.assertTrue(any("data-migration" in s for s in skills), skills)
+
+    def test_unrelated_task_does_not_get_data_migration(self) -> None:
+        self.init_workflow()
+        skills = self._skills("Fix a typo in the order confirmation email", "backend")
+        self.assertFalse(any("data-migration" in s for s in skills), skills)
+
+
+class DataMigrationContentTests(unittest.TestCase):
+    """The skill must tell the agent to establish the migration target from the
+    repo rather than assume it (or interrogate the user about it)."""
+
+    SKILL = REPO_ROOT / ".ai" / "skills" / "core" / "data-migration" / "SKILL.md"
+
+    def test_covers_identifying_the_target_database(self) -> None:
+        text = self.SKILL.read_text(encoding="utf-8").lower()
+        for token in ("database_url", "compose", "host and port", "inside the container"):
+            with self.subTest(token=token):
+                self.assertIn(token, text)
+
+    def test_target_confirmation_is_in_the_checklist(self) -> None:
+        text = self.SKILL.read_text(encoding="utf-8").lower()
+        checklist = text.split("## checklist", 1)[1].split("##", 1)[0]
+        self.assertIn("target database identified", checklist)
+
+
 class LocalScriptContractTests(unittest.TestCase):
     """The helper scripts in .ai/scripts/ are the kit's local QA surface."""
 
@@ -1205,6 +1513,22 @@ class RegistryEndToEndRoutingTests(EngineTestCase):
         skills = self._route("T1")["skills"]
         self.assertTrue(any("performance-profiling" in s for s in skills), skills)
         self.assertFalse(any("/ai/" in s for s in skills), f"unexpected AI skills: {skills}")
+
+    def test_planner_owned_task_routes_to_requirement_decomposer(self) -> None:
+        """Task decomposition is a base planner responsibility, loaded
+        unconditionally like requirements-intake -- not something a keyword
+        trigger should gate."""
+        self.init_workflow()
+        self.add_task("T1", title="Break the checkout redesign brief into tasks", owner="planner")
+        skills = self._route("T1")["skills"]
+        self.assertTrue(any("requirement-decomposer" in s for s in skills), skills)
+        self.assertTrue(any("requirements-intake" in s for s in skills), skills)
+
+    def test_architect_owned_task_routes_to_system_designer(self) -> None:
+        self.init_workflow()
+        self.add_task("T1", title="Define module boundaries for the new billing service", owner="architect")
+        skills = self._route("T1")["skills"]
+        self.assertTrue(any("system-designer" in s for s in skills), skills)
 
     def test_llm_cost_task_still_pulls_ai_skills(self) -> None:
         self.init_workflow()

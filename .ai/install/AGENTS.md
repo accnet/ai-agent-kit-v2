@@ -100,6 +100,68 @@ illegal transitions, missing acceptance criteria, and ambiguous task ownership.
 The Planner, Executor, Reviewer, and QA are workers operating through that
 control plane; no worker may bypass a gate by directly changing lifecycle state.
 
+### Platform Capability Map
+
+The components above are architectural roles, not new code to write. Each one
+already exists as a concrete `ai-kit` command or artifact. This table is the
+one normative place that maps the architect-role vocabulary onto what is
+actually implemented, so the platform story stays honest instead of aspirational.
+`tests/test_agents_conformance.py::PlatformCapabilityMapTests` asserts every
+`ai-kit <command>` cell names a real subcommand and every artifact path is one
+the engine actually writes.
+
+| Role | Capability | `ai-kit` command / artifact |
+| --- | --- | --- |
+| Project Analyzer | Detects stack, tooling, and container/database runtime from the repo | `ai-kit onboard [--apply]` |
+| Project Analyzer / Knowledge Graph Builder | Combines onboard's detection with contexts.yaml's module + ownership graph and static-analysis risk signals (unowned context, dangling dependency, no verification command) | `ai-kit analyze` -> `.ai-work/analysis/project-summary.json` |
+| Impact Analyzer | Direct/transitive dependents and affected tasks for a module | `ai-kit context impact <name>` |
+| Task DAG Builder | Task graph with waves, ready set, and critical path | `ai-kit visualizer generate` -> `.visualizer/dag.json`, rendered at `.visualizer/dag.html` |
+| Execution Contract Builder | Self-contained JSON handoff for a dispatched task (owner, acceptance, routing, instructions) | written by `ai-kit dispatch` / `dispatch-ready` / `pipeline` to `.ai-work/handoffs/<task-id>.json` |
+| Runtime Observer | Append-only audit trail of every state transition | `.ai-work/logs/events.jsonl`, surfaced as `.visualizer/events.json` by `ai-kit visualizer generate` |
+| Scheduler Advisor | What can run now vs. what is blocked and why | `ai-kit ready`, `ai-kit blocked`, `ai-kit dispatch-ready` |
+| Architecture / Module Graph | Module ownership and dependency graph from declared contexts | `ai-kit context list` -> `.visualizer/architecture.json` |
+
+This map only lists capabilities with a working command behind them today. A
+role above this table without a row here (Planner, Reviewer, QA, Memory
+Engine) is intentionally not included: it is fulfilled by an agent contract
+and a gate, not by a queryable engine artifact, and adding a row for it here
+without one would repeat the exact failure mode `test_agents_conformance.py`
+already guards against.
+
+`analyze`'s "Knowledge Graph Builder" half is deliberately scoped to the
+Module Graph and Ownership Graph a project's own `.ai-config/contexts.yaml`
+declares -- it is not a language-aware source parser, and does not extract
+entities, API shapes, or call graphs from arbitrary code. A project that
+never registers any contexts gets an empty graph, not a fallback scan of its
+source tree; widening this into real code analysis is a new, separately
+tested capability, not a quiet extension of `cmd_analyze`.
+
+### Artifact Schema Versioning
+
+Every artifact a worker or external tool consumes carries an explicit
+version, so a consumer can detect a shape change instead of silently
+misreading a renamed or retyped field:
+
+- `.ai-work/state/workflow.json` has a top-level `version` (currently `2`);
+  `.ai/engine/state-schema.md` documents its fields.
+- `.ai-work/handoffs/<task-id>.json` (the Execution Contract Builder output)
+  has `schema_version: 1`.
+- `.visualizer/artifacts.json` is a manifest written alongside the other
+  `.visualizer/*.json` payloads on every `ai-kit visualizer generate`: it
+  has its own `schema_version` plus a per-file `artifacts: {filename:
+  version}` map (`VISUALIZER_ARTIFACT_VERSIONS` in `ai_kit.py`). The
+  payloads it describes (`board.json`, `architecture.json`, `impact.json`,
+  `events.json`, `dag.json`) do not carry the version field themselves --
+  they are keyed by task id, context name, or a fixed field set that
+  `.visualizer/app.js` and `.visualizer/dag.html` read directly (pinned by
+  `tests/test_visualizer_contract.py`), and mixing a `schema_version` key
+  into one of those dicts would be misread as a task, module, or column.
+
+Bump the relevant version only when a payload's top-level shape changes in
+a way a consumer must know about (a field added, removed, or retyped) --
+not on every content change. `ai_kit._validate_visualizer_manifest` rejects
+a malformed manifest (missing/mistyped `schema_version` or `artifacts`).
+
 ### Required Runtime Evidence
 
 Before a component is marked implemented, provide:
@@ -152,6 +214,7 @@ These concerns are mandatory when their trigger is present:
 | Ship, CI, version, deployment, rollback | Release/DevOps: `release-management`, `github-actions-ci`, `deployment-infra` |
 | UI interaction | Frontend: `accessibility`, `frontend-core` |
 | New or upgraded dependency | DevOps: `dependency-management` |
+| Schema or data change (migration, backfill, seed) | Database: `data-migration` |
 | User, API, operational, or decision documentation | Document: `documentation-maintenance` |
 
 AI trigger routing (registry-backed) is mandatory when matched by task content:
@@ -187,6 +250,63 @@ Work in dependency order. Parallel work must have disjoint file ownership or
 an explicit integration owner. Re-plan when scope changes; do not silently
 extend a task. Migration and database work always requires a plan, including
 schema changes, data fixes, seeds, and backfills.
+
+A feature that introduces or changes a bounded context/module boundary
+follows this order: `requirements-intake` (WHAT is wanted) ->
+`system-designer` (register the module/ownership graph in
+`.ai-config/contexts.yaml` before any task references it) ->
+`requirement-decomposer` (turn the brief into atomic, dependency-ordered
+tasks, tagged against the contexts `system-designer` just registered). Both
+are role-core skills (Planner, Architect) loaded unconditionally, not
+keyword-triggered, since decomposition and boundary design are base
+responsibilities of those roles on every task, not situational concerns.
+
+## Multi-Stage Planning Pipeline
+
+There is no single `ai-kit` command that runs a feature from raw request to
+`done`. The recommended sequence chains the skills and commands documented
+above; this section is that documentation, not a new command:
+
+1. **Intake** (`requirements-intake`, judgment required): interpret the raw
+   request into `.ai-work/requirements/brief.md` — problem, scope,
+   acceptance criteria, open questions.
+2. **Design** (`system-designer`, judgment required, only when a boundary
+   changes): register the affected bounded context(s) via
+   `ai-kit context add` before any task references them.
+3. **Decompose** (`requirement-decomposer`, judgment required): turn the
+   brief into atomic, dependency-ordered tasks via `ai-kit plan --idea ...`
+   / `ai-kit add-task`.
+4. **Route** (mechanical, deterministic): `ai-kit route T<n>` resolves the
+   assigned role, core skills, and stack-relevant technology knowledge for
+   each task the previous stage created.
+5. **Execute one task** (mechanical once dispatched):
+   `ai-kit pipeline T<n>` runs dispatch -> verify -> QA -> review -> close
+   for that task, refusing to auto-approve when verification is
+   inconclusive (G2) or when QA/review would run under the executor's own
+   runner/model.
+6. **Execute the runnable set** (mechanical): `ai-kit ready` /
+   `ai-kit dispatch-ready --limit N`, repeated as completed tasks unblock
+   their dependents.
+
+Stages 1-3 are deliberately **not** chained into one command. Each one
+requires interpreting free-form intent, weighing a trade-off, or naming a
+domain concept — judgment this stdlib engine cannot perform and must not
+fake. An engine-level command that "automated" this would either run a
+heuristic that only pretends to write a brief/design, or silently re-host an
+LLM call behind a function with no persisted schema, no failure mode, and no
+test — exactly what "Required Runtime Evidence" above forbids. Stages 4-6
+are already automated (`route`, `pipeline`, `dispatch-ready`) precisely
+because their outcomes are deterministic and mechanically checkable.
+
+`ai-kit pipeline` itself only ever advances **one already-created task**
+through its execution lifecycle; it is not a multi-task or multi-stage
+scheduler. It is synchronous, has no background scheduler, auto-trigger, or
+retry/resume across phases (see its own docstring in `ai_kit.py`), and a
+stalled or failed phase simply stops and reports why — rerun it after fixing
+the cause. Running it across a feature's full task graph means invoking it
+(or `dispatch-ready`) once per ready task, repeated as the graph unblocks;
+that repetition is a documented operating procedure, not a hidden capability
+to build.
 
 ## Gates
 
