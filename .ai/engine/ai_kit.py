@@ -54,7 +54,13 @@ CONFIG_FILES = {
     "rules.yaml",
     "kit.yaml",
 }
-STATUSES = ("todo", "in-progress", "implementation-complete", "qa-passed", "review-approved", "done", "blocked")
+STATUSES = ("todo", "in-progress", "implementation-complete", "qa-passed", "review-approved", "done", "blocked", "superseded", "cancelled")
+# Statuses that satisfy a downstream `needs`/plan dependency. `superseded`
+# and `cancelled` are terminal-but-not-`done`: the work was deliberately
+# abandoned (in favor of another task, or because it's no longer wanted)
+# rather than completed, but a dependent must still be able to proceed
+# instead of waiting forever on work that will never finish.
+DEPENDENCY_SATISFYING_STATUSES = {"done", "superseded", "cancelled"}
 
 
 def _config_path(name: str) -> Path:
@@ -618,6 +624,14 @@ TRANSITIONS = {
     "block": ({"todo", "in-progress", "implementation-complete", "qa-passed", "review-approved"}, "blocked"),
     "unblock": ({"blocked"}, "todo"),
     "reject": ({"implementation-complete", "qa-passed"}, "todo"),
+    # A controlled way to retire a task whose objective was already met by
+    # another task (or is no longer wanted) without hand-editing status to
+    # "done" (which would corrupt the audit trail) or leaving it stuck at
+    # "todo" forever. Both require --detail (why); "supersede" additionally
+    # requires --by <task-id> naming the task that replaced this one, so the
+    # replacement relationship is recorded, not just implied.
+    "supersede": ({"todo", "in-progress", "blocked"}, "superseded"),
+    "cancel": ({"todo", "in-progress", "blocked"}, "cancelled"),
 }
 
 
@@ -883,6 +897,7 @@ def validate(state: dict) -> None:
         task.setdefault("depends_on", [])
         task.setdefault("contract_hashes", {})
         task.setdefault("upstream_context_revisions", {})
+        task.setdefault("superseded_by", None)
     missing = set()  # reset after migration
     if missing:
         raise EngineError(f"state missing keys: {', '.join(sorted(missing))}")
@@ -895,8 +910,12 @@ def validate(state: dict) -> None:
         for key in ("id", "title", "owner", "phase", "needs", "status", "acceptance", "files", "attempts", "evidence", "tags"):
             if key not in task:
                 raise EngineError(f"task {task.get('id', '?')} missing {key}")
-        if task["status"] not in {"todo", "in-progress", "implementation-complete", "qa-passed", "review-approved", "done", "blocked"}:
+        if task["status"] not in STATUSES:
             raise EngineError(f"task {task['id']} has invalid status")
+        if task["status"] == "superseded" and not task.get("superseded_by"):
+            raise EngineError(f"task {task['id']} is superseded but has no superseded_by task recorded")
+        if task.get("superseded_by") and task["superseded_by"] not in tasks:
+            raise EngineError(f"task {task['id']} superseded_by references unknown task: {task['superseded_by']}")
         if task["owner"] not in role_names():
             raise EngineError(f"task {task['id']} has unknown owner: {task['owner']}")
         if not task["phase"].strip() or not task["acceptance"]:
@@ -931,11 +950,11 @@ def validate(state: dict) -> None:
     # Set `planning_first: false` in .ai-config/rules.yaml to skip this check.
     if rules.get("planning_first", True):
         for task in state["tasks"]:
-            past_todo = task["status"] not in {"todo", "blocked"}
+            past_todo = task["status"] not in {"todo", "blocked", "superseded", "cancelled"}
             if past_todo and task["phase"] != "plan":
                 plan_deps = [dep for dep in task["needs"] if tasks[dep].get("phase") == "plan"]
-                if plan_deps and not all(tasks[dep]["status"] == "done" for dep in plan_deps):
-                    offender = next(dep for dep in plan_deps if tasks[dep]["status"] != "done")
+                if plan_deps and not all(tasks[dep]["status"] in DEPENDENCY_SATISFYING_STATUSES for dep in plan_deps):
+                    offender = next(dep for dep in plan_deps if tasks[dep]["status"] not in DEPENDENCY_SATISFYING_STATUSES)
                     raise EngineError(
                         f"G1 planning_first: task {task['id']} ({task['status']}) "
                         f"needs plan dependency {offender} ({tasks[offender]['status']}) completed"
@@ -998,7 +1017,7 @@ def sync_phases(state: dict) -> None:
     phases = []
     for name in names:
         tasks = [task for task in state["tasks"] if task["phase"] == name]
-        status = "complete" if tasks and all(task["status"] == "done" for task in tasks) else "open" if any(runnable(task, task_map(state)) for task in tasks) else "planned"
+        status = "complete" if tasks and all(task["status"] in DEPENDENCY_SATISFYING_STATUSES for task in tasks) else "open" if any(runnable(task, task_map(state)) for task in tasks) else "planned"
         phases.append({"id": name, "status": status, "tasks": [task["id"] for task in tasks]})
     state["phases"] = phases
 
@@ -1010,7 +1029,7 @@ def sync_tasks_md(state: dict, state_path: Path) -> None:
     tasks_md = tasks_dir / "tasks.md"
     lines = ["# Tasks", ""]
     for task in state["tasks"]:
-        status_mark = "x" if task["status"] == "done" else " "
+        status_mark = "x" if task["status"] == "done" else "~" if task["status"] in {"superseded", "cancelled"} else " "
         needs = f" | needs: {','.join(task['needs'])}" if task["needs"] else ""
         if task.get("context"):
             rev = f"@r{task['context_revision']}" if task.get("context_revision") is not None else ""
@@ -1030,11 +1049,13 @@ def sync_tasks_md(state: dict, state_path: Path) -> None:
         lines.append(f"  - Status: {task['status']}")
         if task.get("blocked_reason"):
             lines.append(f"  - Note: {task['blocked_reason']}")
+        if task.get("superseded_by"):
+            lines.append(f"  - Superseded by: {task['superseded_by']}")
     tasks_md.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def runnable(task: dict, tasks: dict) -> bool:
-    return task["status"] == "todo" and all(tasks[dep]["status"] == "done" for dep in task["needs"])
+    return task["status"] == "todo" and all(tasks[dep]["status"] in DEPENDENCY_SATISFYING_STATUSES for dep in task["needs"])
 
 
 def validate_evidence(task: dict, action: str, paths: list[str]) -> None:
@@ -1053,8 +1074,78 @@ def validate_evidence(task: dict, action: str, paths: list[str]) -> None:
             raise EngineError(f"evidence does not match {expected_kind} task {task['id']}: {item}")
         if action == "qa-pass" and payload.get("status") != "pass":
             raise EngineError(f"QA evidence is not passing: {item}")
+        if action == "qa-pass":
+            _validate_qa_checks(task, payload, item)
         if action == "review-approve" and payload.get("verdict") != "approve":
             raise EngineError(f"review evidence is not approved: {item}")
+
+
+def _validate_qa_checks(task: dict, payload: dict, source: str) -> None:
+    """Validate the optional structured `checks` list on QA evidence.
+
+    Real-world QA often mixes results that mean very different things for a
+    'pass' verdict: a failure the task's own change introduced, a failure
+    that already existed on the target environment before this task touched
+    anything (a "baseline failure"), and a check that simply doesn't apply
+    to this task's scope. Treating all three the same as "the suite failed,
+    therefore no pass" blocks legitimate work forever; treating them all the
+    same as "some other check failed, so it's fine" silently rubber-stamps
+    real regressions. `checks` (optional, backward compatible with plain
+    {"status": "pass"} evidence) lets a QA agent record each check's
+    classification explicitly instead of collapsing that judgment call into
+    a single boolean.
+    """
+    checks = payload.get("checks")
+    if checks is None:
+        return
+    if not isinstance(checks, list):
+        raise EngineError(f"QA evidence 'checks' for task {task['id']} must be a list: {source}")
+    for check in checks:
+        if not isinstance(check, dict):
+            raise EngineError(f"QA evidence 'checks' entries for task {task['id']} must be objects: {source}")
+        name = check.get("name")
+        result = check.get("result")
+        if not name or result not in {"pass", "fail"}:
+            raise EngineError(
+                f"QA evidence check for task {task['id']} needs a 'name' and a 'result' of 'pass' or "
+                f"'fail': {source}"
+            )
+        if result == "pass":
+            continue
+        classification = check.get("classification")
+        if classification not in {"task", "baseline", "not-applicable"}:
+            raise EngineError(
+                f"QA evidence check '{name}' for task {task['id']} failed and must set 'classification' to "
+                f"'task' (caused by this task's change), 'baseline' (pre-existing, unrelated failure), or "
+                f"'not-applicable' (check does not apply to this task): {source}"
+            )
+        if classification == "task":
+            raise EngineError(
+                f"QA evidence check '{name}' for task {task['id']} is classified as a task-caused failure; "
+                f"the task cannot qa-pass until it is fixed or the classification is corrected: {source}"
+            )
+        if classification == "not-applicable" and not str(check.get("note") or "").strip():
+            raise EngineError(
+                f"QA evidence check '{name}' for task {task['id']} is classified as not-applicable and "
+                f"requires a 'note' explaining why: {source}"
+            )
+        if classification == "baseline":
+            # This is the crux of the gate: a pre-existing baseline failure
+            # is never auto-accepted just because the task's own executor
+            # (or QA acting alone) says so. A distinct reviewer must
+            # separately confirm it, structurally recorded, not merely
+            # implied by the evidence's overall 'pass' status.
+            confirmation = check.get("reviewer_confirmation")
+            if (
+                not isinstance(confirmation, dict)
+                or not str(confirmation.get("actor") or "").strip()
+                or not str(confirmation.get("note") or "").strip()
+            ):
+                raise EngineError(
+                    f"QA evidence check '{name}' for task {task['id']} is classified as a baseline failure "
+                    f"and requires a separate reviewer_confirmation object with a non-empty 'actor' and "
+                    f"'note' -- a baseline failure is never automatically treated as a pass: {source}"
+                )
 
 
 def event(state: dict, path: Path, action: str, task: dict | None, actor: str, old: str | None, new: str | None, detail: str) -> dict:
@@ -1243,8 +1334,16 @@ def cmd_transition(args: argparse.Namespace) -> dict:
         raise EngineError(f"cannot {args.action} {args.id} from {task['status']}")
     if args.action == "start" and not runnable(task, task_map(state)):
         raise EngineError(f"task {args.id} is blocked by unfinished dependencies")
-    if args.action in {"block", "reject"} and not args.detail:
+    if args.action in {"block", "reject", "supersede", "cancel"} and not args.detail:
         raise EngineError(f"{args.action} requires --detail")
+    if args.action == "supersede":
+        by_id_arg = getattr(args, "by", None)
+        if not by_id_arg:
+            raise EngineError("supersede requires --by <replacing-task-id>")
+        if by_id_arg not in task_map(state):
+            raise EngineError(f"supersede --by references unknown task: {by_id_arg}")
+        if by_id_arg == task["id"]:
+            raise EngineError(f"task {task['id']} cannot be superseded by itself")
     if args.action in {"qa-pass", "review-approve", "reject"}:
         # P0-4: Executor must not QA/review/reject their own work. claimed_by may
         # carry a per-agent-instance suffix ("role#agent_id"); compare on the role
@@ -1257,10 +1356,12 @@ def cmd_transition(args: argparse.Namespace) -> dict:
             raise EngineError(f"{args.action} requires at least one --evidence path")
         validate_evidence(task, args.action, args.evidence)
     old = task["status"]; task["status"] = target
-    if args.action in {"block", "reject"}:
+    if args.action in {"block", "reject", "supersede", "cancel"}:
         task["blocked_reason"] = args.detail
     elif args.action in {"start", "unblock"}:
         task["blocked_reason"] = None
+    if args.action == "supersede":
+        task["superseded_by"] = getattr(args, "by", None)
     if args.evidence:
         task["evidence"].extend(args.evidence)
     if args.action == "start":
@@ -1774,7 +1875,7 @@ def _generate_dag_payload(state: dict) -> dict:
             "history": history.get(task_id, {}),
         })
         for dep in task["needs"]:
-            edges.append({"from": dep, "to": task_id, "unlocked": by_id[dep]["status"] == "done"})
+            edges.append({"from": dep, "to": task_id, "unlocked": by_id[dep]["status"] in DEPENDENCY_SATISFYING_STATUSES})
 
     return {
         "tasks": dag_tasks,
@@ -3183,7 +3284,7 @@ def parser() -> argparse.ArgumentParser:
     update = sub.add_parser("update-task"); update.add_argument("id"); update.add_argument("--add-acceptance", nargs="+", action="append"); update.add_argument("--add-files", nargs="*"); update.add_argument("--add-tags", nargs="*"); update.add_argument("--actor", default="planner"); update.set_defaults(fn=cmd_update_task)
     ready = sub.add_parser("ready"); ready.add_argument("--context"); ready.add_argument("--epic"); ready.set_defaults(fn=cmd_ready)
     plan = sub.add_parser("plan"); plan.add_argument("--idea", required=True); plan.add_argument("--workflow", default="feature"); plan.add_argument("--owner", required=True); plan.add_argument("--acceptance", nargs="+", action="append", required=True); plan.add_argument("--files", nargs="*"); plan.add_argument("--tags", nargs="*"); plan.add_argument("--phase", default="build"); plan.add_argument("--context"); plan.add_argument("--epic"); plan.add_argument("--depends-on", action="append", default=[], metavar="PATH"); plan.add_argument("--scope"); plan.add_argument("--out-of-scope"); plan.add_argument("--risks", nargs="*"); plan.add_argument("--assumptions"); plan.add_argument("--actor", default="planner"); plan.add_argument("--force", action="store_true"); plan.set_defaults(fn=cmd_plan)
-    trans = sub.add_parser("transition"); trans.add_argument("id"); trans.add_argument("action", choices=TRANSITIONS); trans.add_argument("--actor", required=True); trans.add_argument("--detail"); trans.add_argument("--evidence", nargs="+"); trans.add_argument("--expected-revision", type=int); trans.add_argument("--agent-id", help="unique identity of the agent instance, appended to claimed_by as 'actor#agent_id' for audit when multiple agents share a role"); trans.set_defaults(fn=cmd_transition)
+    trans = sub.add_parser("transition"); trans.add_argument("id"); trans.add_argument("action", choices=TRANSITIONS); trans.add_argument("--actor", required=True); trans.add_argument("--detail"); trans.add_argument("--evidence", nargs="+"); trans.add_argument("--expected-revision", type=int); trans.add_argument("--agent-id", help="unique identity of the agent instance, appended to claimed_by as 'actor#agent_id' for audit when multiple agents share a role"); trans.add_argument("--by", metavar="TASK-ID", help="required for 'supersede': the task id that replaced this one"); trans.set_defaults(fn=cmd_transition)
     approve = sub.add_parser("approve"); approve.add_argument("id"); approve.add_argument("--role", choices=["qa", "review"], required=True); approve.add_argument("--status"); approve.add_argument("--reason", required=True); approve.add_argument("--runner"); approve.add_argument("--model"); approve.add_argument("--agent-id"); approve.set_defaults(fn=cmd_approve)
     verify = sub.add_parser("verify"); verify.add_argument("id"); verify.set_defaults(fn=cmd_verify)
     dispatch = sub.add_parser("dispatch"); dispatch.add_argument("id"); dispatch.add_argument("--runner"); dispatch.add_argument("--model"); dispatch.add_argument("--agent-id"); dispatch.set_defaults(fn=cmd_dispatch)
