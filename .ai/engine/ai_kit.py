@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import hashlib
 import fnmatch
 import os
@@ -22,6 +23,28 @@ STATE = WORK / "state" / "workflow.json"
 CURRENT = WORK / "state" / "current.json"
 EVENT_LOG = WORK / "logs" / "events.jsonl"
 VISUALIZER_DIR = ROOT / ".visualizer"
+# Per-artifact schema version for the generated .visualizer/*.json payloads.
+# Bump an individual entry when that artifact's shape changes in a way a
+# consumer must know about (added/removed/retyped top-level field); the
+# board/architecture/impact/dag payloads themselves are keyed by task id,
+# context name, or fixed field name and are read that way by app.js/dag.html
+# (see tests/test_visualizer_contract.py), so schema_version is never mixed
+# into those payloads -- it would be misread as a task, module, or column.
+# .visualizer/artifacts.json is the one place a consumer checks compatibility
+# before parsing the rest, mirroring the handoff JSON's own "schema_version".
+# discovered-architecture.json is the one deliberate exception: it is a new,
+# self-contained artifact (not a bag keyed by task/module id at its top
+# level), so it carries its own top-level "schema_version" field the same
+# way the handoff JSON does -- see ARCHITECTURE_DISCOVERY_SCHEMA_VERSION.
+VISUALIZER_ARTIFACT_VERSIONS = {
+    "board.json": 1,
+    "architecture.json": 1,
+    "impact.json": 1,
+    "events.json": 1,
+    "dag.json": 1,
+    "discovered-architecture.json": 1,
+}
+VISUALIZER_MANIFEST_SCHEMA_VERSION = 1
 CONFIG_FILES = {
     "runners.yaml",
     "automation.yaml",
@@ -63,11 +86,37 @@ def _load_registry() -> dict:
                 role = match.group(1)
                 domains = [d.strip() for d in match.group(2).split(",") if d.strip()]
                 owners[role] = domains
+            else:
+                # Without this, a role whose domain list wraps onto a second
+                # line simply fails the regex and vanishes from `owners`, so
+                # that role silently routes no technology skills at all.
+                wrapped = re.match(r"\s+(\w+):\s*(.+)$", line)
+                if wrapped:
+                    _reject_unterminated_list(wrapped.group(2).strip(), registry_path, f"owners.{wrapped.group(1)}")
     core_names: list[str] = []
     match = re.search(r"names:\s*\[([^\]]*)\]", text)
     if match:
         core_names = [n.strip() for n in match.group(1).split(",") if n.strip()]
     return {"owners": owners, "core_skills": {"names": core_names}}
+
+
+def _reject_unterminated_list(value: str, source: Path, key: str) -> None:
+    """Fail loudly on a ``[...]`` array wrapped across physical lines.
+
+    Every YAML reader in this engine is line-based (no PyYAML dependency),
+    so a value that opens ``[`` on one line and closes ``]`` on the next is
+    not merely unsupported -- it is silently stored as the first line's raw
+    text, producing a list-shaped field that can never match anything, with
+    no error at load time. That failure mode is invisible: a
+    ``skill_triggers`` entry simply stops firing. Raise instead, naming the
+    file and key, so the author sees it immediately.
+    """
+    if value.startswith("[") and not value.endswith("]"):
+        raise EngineError(
+            f"{display_path(source)}: value for '{key}' opens '[' but does not close ']' on the "
+            f"same line. This engine's YAML readers are line-based, so a multi-line array is "
+            f"silently truncated rather than parsed -- keep the whole list on one line."
+        )
 
 
 def _load_yaml_registry(relative_path: str, top_key: str) -> dict:
@@ -108,6 +157,7 @@ def _load_yaml_registry(relative_path: str, top_key: str) -> dict:
         field_match = re.match(r"^    (\w+):\s*(.+)$", line)
         if field_match and current:
             value = field_match.group(2).strip()
+            _reject_unterminated_list(value, path, f"{current}.{field_match.group(1)}")
             # Registry writers use JSON double-quoted scalars when a value may
             # contain YAML-significant characters (or intentional whitespace).
             # JSON is a strict, dependency-free subset for these scalar values.
@@ -542,9 +592,9 @@ ROLE_DOMAINS = {
     "database": ["database"], "devops": ["devops"], "release": ["devops"], "qa": ["testing"],
 }
 CORE_BY_ROLE = {
-    "planner": ["requirements-intake", "skill-router"],
+    "planner": ["requirements-intake", "requirement-decomposer", "skill-router"],
     "researcher": ["requirements-intake", "skill-router"],
-    "architect": ["refactoring", "api-contract"],
+    "architect": ["refactoring", "api-contract", "system-designer"],
     "backend": ["api-contract", "observability"],
     "frontend": ["frontend-core", "test-and-validation"],
     "database": ["data-migration", "api-contract"],
@@ -613,6 +663,16 @@ def configured_stack() -> set[str]:
     return {item.strip().lower() for item in match.group(1).split(",") if item.strip()} if match else set()
 
 
+def configured_source_dirs() -> list[str]:
+    """kit.yaml's `project.source_dirs`, the scan scope architecture
+    discovery is confined to -- the same list `onboard`/`analyze` propose."""
+    manifest = _config_path("kit.yaml")
+    if not manifest.exists():
+        return []
+    match = re.search(r"^\s*source_dirs:\s*\[([^]]*)\]", manifest.read_text(encoding="utf-8"), re.MULTILINE)
+    return [item.strip() for item in match.group(1).split(",") if item.strip()] if match else []
+
+
 def _parse_inline_list(value: object) -> list[str]:
     if isinstance(value, list):
         return [str(item).strip() for item in value if str(item).strip()]
@@ -655,6 +715,7 @@ def _load_skill_metadata(skill_dir: Path) -> dict:
         if not line or line.startswith("#") or ":" not in line:
             continue
         key, value = line.split(":", 1)
+        _reject_unterminated_list(value.strip(), meta_path, key.strip())
         fields[key.strip()] = value.strip()
     metadata = dict(defaults)
     metadata["name"] = str(fields.get("name") or metadata["name"]).strip()
@@ -671,6 +732,40 @@ def _load_skill_metadata(skill_dir: Path) -> dict:
     metadata["entrypoint"] = str(fields.get("entrypoint") or metadata["entrypoint"]).strip()
     metadata["path"] = str(fields.get("path") or metadata["path"]).strip()
     return metadata
+
+
+def _load_stack_skills() -> dict[str, list[str]]:
+    """Load registry.yaml's `stack_skills:` map of skill path -> stack tags.
+
+    Routing otherwise matches a technology skill only when the skill's own
+    directory name (or its domain) appears in the task's tokens, which leaves
+    every skill whose name differs from its tag unreachable via
+    `kit.yaml project.stack`: `docker-compose-local` declares
+    `stack: [docker, compose]`, `nestjs-core` declares `[nestjs]`, and so on.
+    This section already encodes the intended mapping -- it simply was not
+    read by anything.
+
+    Written in flow style (`name: {path: ..., stack: [a, b]}`), so it needs
+    its own small parser rather than the indented-block reader above.
+    """
+    path = _config_path("registry.yaml")
+    if not path.exists():
+        return {}
+    text = path.read_text(encoding="utf-8")
+    if "stack_skills:" not in text:
+        return {}
+    section = text.split("stack_skills:", 1)[1]
+    mapping: dict[str, list[str]] = {}
+    for line in section.splitlines():
+        if line and not line.startswith((" ", "\t")):
+            break  # next top-level key
+        match = re.match(r"^  (\S+):\s*\{path:\s*([^,}]+),\s*stack:\s*\[([^\]]*)\]\s*\}", line)
+        if match:
+            skill_path = match.group(2).strip().rstrip("/")
+            tags = [tag.strip().lower() for tag in match.group(3).split(",") if tag.strip()]
+            if tags:
+                mapping[skill_path] = tags
+    return mapping
 
 
 def _load_skill_triggers() -> dict[str, dict]:
@@ -972,6 +1067,31 @@ def event(state: dict, path: Path, action: str, task: dict | None, actor: str, o
     return item
 
 
+def _visualizer_manifest() -> dict:
+    """The one file a consumer checks for compatibility before parsing any
+    other .visualizer/*.json payload -- see VISUALIZER_ARTIFACT_VERSIONS."""
+    manifest = {
+        "schema_version": VISUALIZER_MANIFEST_SCHEMA_VERSION,
+        "generated_at": now(),
+        "artifacts": dict(VISUALIZER_ARTIFACT_VERSIONS),
+    }
+    _validate_visualizer_manifest(manifest)
+    return manifest
+
+
+def _validate_visualizer_manifest(manifest: dict) -> None:
+    if not isinstance(manifest.get("schema_version"), int):
+        raise EngineError("visualizer manifest: schema_version must be an int")
+    artifacts = manifest.get("artifacts")
+    if not isinstance(artifacts, dict) or not artifacts:
+        raise EngineError("visualizer manifest: artifacts must be a non-empty object")
+    for filename, version in artifacts.items():
+        if not isinstance(filename, str) or not filename.endswith(".json"):
+            raise EngineError(f"visualizer manifest: invalid artifact filename {filename!r}")
+        if not isinstance(version, int):
+            raise EngineError(f"visualizer manifest: artifact version for {filename!r} must be an int")
+
+
 def _generate_visualizer_data(state_arg: str | Path | None = None) -> dict:
     if not VISUALIZER_DIR.exists():
         return {}
@@ -983,6 +1103,8 @@ def _generate_visualizer_data(state_arg: str | Path | None = None) -> dict:
             "impact.json": {},
             "events.json": [],
             "dag.json": {"tasks": [], "edges": [], "waves": 0, "ready": [], "critical_path": []},
+            "discovered-architecture.json": _discovered_architecture_with_tasks(None),
+            "artifacts.json": _visualizer_manifest(),
         }
         for filename, payload in payloads.items():
             (VISUALIZER_DIR / filename).write_text(
@@ -1020,6 +1142,8 @@ def _generate_visualizer_data(state_arg: str | Path | None = None) -> dict:
         "impact.json": impact,
         "events.json": events,
         "dag.json": _generate_dag_payload(state),
+        "discovered-architecture.json": _discovered_architecture_with_tasks(state),
+        "artifacts.json": _visualizer_manifest(),
     }
     for filename, payload in payloads.items():
         (VISUALIZER_DIR / filename).write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
@@ -1293,15 +1417,20 @@ def cmd_route(args: argparse.Namespace) -> dict:
             continue
         domain_candidates.extend(sorted(path for path in folder.iterdir() if path.is_dir()))
 
+    stack_skills = _load_stack_skills()
     for skill_dir in domain_candidates:
         skill_name = skill_dir.name.lower()
         domain_name = skill_dir.parent.name.lower()
-        should_include = (
-            skill_name in tokens
-            or domain_name in tokens
-        )
-        if should_include:
+        # A skill is in scope when the task's tokens name the skill directly,
+        # name its domain, or match one of the stack tags registry.yaml's
+        # stack_skills declares for it (e.g. `docker`/`compose` selecting
+        # docker-compose-local, whose directory name is neither).
+        declared_tags = stack_skills.get(skill_dir.relative_to(ROOT).as_posix(), [])
+        matched_tags = [tag for tag in declared_tags if tag in tokens]
+        if skill_name in tokens or domain_name in tokens:
             add_technology(skill_dir, f"role-domain:{domain_name}", "role-technology")
+        elif matched_tags:
+            add_technology(skill_dir, f"stack:{','.join(sorted(matched_tags))}", "role-technology")
 
     # Trigger-driven concerns from registry.
     for trigger_id, trigger in trigger_registry.items():
@@ -1887,6 +2016,62 @@ def cmd_graph(args: argparse.Namespace) -> str:
     return "\n".join(lines + ["}"])
 
 
+COMPOSE_FILENAMES = ("docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml")
+
+# Image name fragment -> the technology skill / stack tag it implies. Used to
+# recognize a datastore declared as a Compose service.
+DATASTORE_IMAGES = {
+    "postgres": "postgresql",
+    "postgis": "postgresql",
+    "pgvector": "pgvector",
+    "mysql": "mysql",
+    "mariadb": "mysql",
+    "redis": "redis",
+    "qdrant": "qdrant",
+}
+
+
+def _detect_container_runtime() -> dict:
+    """Detect whether this project runs its services -- notably its database --
+    in containers, by reading the repo rather than asking.
+
+    Whether the database is a Compose service or a host process decides where
+    a migration actually executes (`docker compose exec db ...` vs a direct
+    connection) and which host a connection string should point at. That is
+    discoverable from docker-compose.yml, so it belongs in configuration
+    resolved once at onboard time, not in a question repeated every task.
+    """
+    compose_file = next((name for name in COMPOSE_FILENAMES if (ROOT / name).is_file()), None)
+    runtime: dict = {
+        "dockerfile": (ROOT / "Dockerfile").is_file(),
+        "compose_file": compose_file,
+        "database_in_compose": False,
+        "database_services": [],
+    }
+    if not compose_file:
+        return runtime
+    # Deliberately a shallow scan, not a YAML parse: this only needs to know
+    # which datastore images appear, and the engine ships without PyYAML.
+    text = (ROOT / compose_file).read_text(encoding="utf-8", errors="replace")
+    service = None
+    for line in text.splitlines():
+        name_match = re.match(r"^  ([A-Za-z0-9._-]+):\s*$", line)
+        if name_match:
+            service = name_match.group(1)
+            continue
+        image_match = re.match(r"^\s+image:\s*[\"']?([^\"'\s]+)", line)
+        if image_match and service:
+            image = image_match.group(1).lower()
+            for fragment, tech in DATASTORE_IMAGES.items():
+                if fragment in image:
+                    runtime["database_in_compose"] = True
+                    runtime["database_services"].append(
+                        {"service": service, "image": image_match.group(1), "technology": tech}
+                    )
+                    break
+    return runtime
+
+
 def cmd_onboard(args: argparse.Namespace) -> dict:
     stacks, sources, commands = [], [], {}
     if (ROOT / "package.json").exists():
@@ -1895,8 +2080,17 @@ def cmd_onboard(args: argparse.Namespace) -> dict:
         stacks.extend(["php", "laravel"]); sources.append("app"); commands["test_command"] = "php artisan test"
     if (ROOT / "pyproject.toml").exists() or (ROOT / "requirements.txt").exists():
         stacks.append("python"); sources.append("src"); commands["test_command"] = "pytest -q"
+    runtime = _detect_container_runtime()
+    if runtime["dockerfile"] or runtime["compose_file"]:
+        stacks.append("docker")
+    if runtime["compose_file"]:
+        stacks.append("compose")
+    # Adding the detected datastore to the stack is what actually routes its
+    # technology skill (and docker-compose-local) into database tasks.
+    stacks.extend(entry["technology"] for entry in runtime["database_services"])
     if not stacks: stacks, sources = ["any"], ["."]
-    proposal = {"stack": sorted(set(stacks)), "source_dirs": sorted(set(sources)), "verification": commands}
+    proposal = {"stack": sorted(set(stacks)), "source_dirs": sorted(set(sources)),
+                "verification": commands, "container_runtime": runtime}
     if args.apply:
         manifest = _config_path("kit.yaml")
         backup = manifest.with_suffix(".yaml.bak")
@@ -1908,6 +2102,498 @@ def cmd_onboard(args: argparse.Namespace) -> dict:
         manifest.write_text(text, encoding="utf-8")
         proposal["applied"] = True
     return proposal
+
+
+ANALYZE_SCHEMA_VERSION = 1
+
+
+def cmd_analyze(args: argparse.Namespace) -> dict:
+    """Project Analyzer + Knowledge Graph Builder: a read-only static-analysis
+    snapshot combining stack/runtime detection (same detection `onboard`
+    uses) with the module and ownership graph declared in
+    `.ai-config/contexts.yaml`, plus a short list of static-analysis risk
+    signals.
+
+    This is deliberately scoped to what the repo's own config actually
+    declares -- a bounded-context/module graph and its owners -- not a
+    language-aware entity/API extractor. There is no parser here for
+    arbitrary source languages, and this function must not grow one; a task
+    that needs that is a new, separately-scoped capability with its own
+    tests, not a quiet expansion of this one.
+    """
+    onboard_proposal = cmd_onboard(argparse.Namespace(apply=False))
+    contexts = _load_contexts()
+    modules = {
+        name: {"path": info.get("path"), "owner": info.get("owner"), "depends_on": list(info.get("depends_on") or [])}
+        for name, info in contexts.items()
+    }
+    ownership: dict[str, list[str]] = {}
+    for name, info in contexts.items():
+        ownership.setdefault(info.get("owner") or "unowned", []).append(name)
+
+    risks = []
+    for name, info in contexts.items():
+        if not info.get("owner"):
+            risks.append({"kind": "unowned_context", "context": name, "detail": "no owner declared in contexts.yaml"})
+        for dependency in info.get("depends_on") or []:
+            if dependency not in contexts:
+                risks.append({
+                    "kind": "dangling_dependency", "context": name,
+                    "detail": f"depends_on unknown context '{dependency}' -- contexts.yaml may have been hand-edited",
+                })
+    if not onboard_proposal.get("verification"):
+        risks.append({"kind": "no_verification_command", "detail": "no test/lint/build command detected; verify will report inconclusive"})
+
+    summary = {
+        "schema_version": ANALYZE_SCHEMA_VERSION,
+        "generated_at": now(),
+        "stack": onboard_proposal["stack"],
+        "container_runtime": onboard_proposal["container_runtime"],
+        "modules": modules,
+        "ownership": ownership,
+        "risks": risks,
+    }
+    output_dir = workspace(state_path(args.state)) / "analysis"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    (output_dir / "project-summary.json").write_text(
+        json.dumps(summary, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+    )
+    return summary
+
+
+# ── ARCHITECTURE DISCOVERY ───────────────────────────────────────────────
+#
+# `.ai-config/contexts.yaml` stays the source of truth for bounded
+# contexts/modules: this section only *adds* a read-only, best-effort scan
+# for the feature modules underneath those contexts (or underneath the
+# project's configured source_dirs, when nothing has been declared yet), so
+# the Architecture Visualizer can render real project structure instead of
+# only the handful of top-level contexts a project happens to have
+# registered. It never writes to contexts.yaml or any source file.
+ARCHITECTURE_DISCOVERY_SCHEMA_VERSION = 1
+
+# Directory names a discovery scan never descends into: build output,
+# dependency caches, VCS metadata, and other conventionally-generated or
+# runtime content that is never a hand-authored feature module.
+DISCOVERY_IGNORE_DIRS = {
+    ".git", "node_modules", "dist", "build", "out", "__pycache__",
+    ".venv", "venv", "env", "data", ".env", ".ai-work", ".visualizer",
+    "coverage", ".pytest_cache", ".mypy_cache", ".ruff_cache", ".next",
+    ".turbo", "vendor", "target", ".tox",
+}
+DISCOVERY_SOURCE_EXTENSIONS = {".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".py"}
+DISCOVERY_TS_EXTENSIONS = {".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"}
+REACT_FEATURE_BUCKETS = ("pages", "components", "features", "services", "contexts")
+
+
+def _discovery_gitignore_patterns() -> list[str]:
+    """Best-effort .gitignore patterns so discovery never descends into
+    project-declared ignored content. Deliberately not a full gitignore
+    matcher (no negation semantics, no anchoring rules) -- good enough to
+    skip an obviously-ignored directory name or glob, not a replacement for
+    git itself."""
+    gitignore = ROOT / ".gitignore"
+    if not gitignore.exists():
+        return []
+    patterns = []
+    for line in gitignore.read_text(encoding="utf-8", errors="replace").splitlines():
+        stripped = line.strip()
+        if stripped and not stripped.startswith("#") and not stripped.startswith("!"):
+            patterns.append(stripped.strip("/"))
+    return patterns
+
+
+def _discovery_is_ignored(rel_path: Path, patterns: list[str]) -> bool:
+    parts = rel_path.parts
+    if any(part in DISCOVERY_IGNORE_DIRS for part in parts):
+        return True
+    rel_str = rel_path.as_posix()
+    for pattern in patterns:
+        if pattern and (fnmatch.fnmatch(rel_str, pattern) or any(fnmatch.fnmatch(part, pattern) for part in parts)):
+            return True
+    return False
+
+
+def _discovery_has_source_files(directory: Path, patterns: list[str]) -> bool:
+    if not directory.is_dir():
+        return False
+    for path in directory.rglob("*"):
+        if not path.is_file() or path.suffix not in DISCOVERY_SOURCE_EXTENSIONS:
+            continue
+        try:
+            rel = path.relative_to(ROOT)
+        except ValueError:
+            continue
+        if not _discovery_is_ignored(rel.parent, patterns):
+            return True
+    return False
+
+
+def _discover_nestjs_modules(source_root: Path, patterns: list[str]) -> list[dict]:
+    """NestJS convention: a directory containing `*.module.ts` is a feature
+    module named after the file (`downloads.module.ts` -> `downloads`)."""
+    modules = []
+    if not source_root.is_dir():
+        return modules
+    for module_file in sorted(source_root.rglob("*.module.ts")):
+        rel_dir = module_file.parent.relative_to(ROOT)
+        if _discovery_is_ignored(rel_dir, patterns):
+            continue
+        name = re.sub(r"\.module$", "", module_file.stem)
+        modules.append({"name": name, "path": rel_dir.as_posix(), "confidence": 0.95, "framework": "nestjs"})
+    return modules
+
+
+def _discover_react_modules(source_root: Path, patterns: list[str]) -> list[dict]:
+    """React/Vite convention: each directory directly under one of
+    src/{pages,components,features,services,contexts} that itself contains
+    source files is a feature module."""
+    modules = []
+    src_dir = source_root / "src"
+    if not src_dir.is_dir():
+        return modules
+    for bucket in REACT_FEATURE_BUCKETS:
+        bucket_dir = src_dir / bucket
+        if not bucket_dir.is_dir():
+            continue
+        for child in sorted(p for p in bucket_dir.iterdir() if p.is_dir()):
+            rel = child.relative_to(ROOT)
+            if _discovery_is_ignored(rel, patterns) or not _discovery_has_source_files(child, patterns):
+                continue
+            modules.append({"name": child.name, "path": rel.as_posix(), "confidence": 0.75, "framework": "react"})
+    return modules
+
+
+def _discover_python_packages(source_root: Path, patterns: list[str]) -> list[dict]:
+    """Python convention: any directory with `__init__.py` (other than the
+    source root itself) is a package/module."""
+    modules = []
+    if not source_root.is_dir():
+        return modules
+    for init_file in sorted(source_root.rglob("__init__.py")):
+        package_dir = init_file.parent
+        if package_dir == source_root:
+            continue
+        rel = package_dir.relative_to(ROOT)
+        if _discovery_is_ignored(rel, patterns):
+            continue
+        modules.append({"name": package_dir.name, "path": rel.as_posix(), "confidence": 0.7, "framework": "python"})
+    return modules
+
+
+def _discover_generic_modules(source_root: Path, patterns: list[str]) -> list[dict]:
+    """Fallback for stacks with no recognized convention: first- and
+    second-level directories that contain source files, lowest confidence."""
+    modules = []
+    if not source_root.is_dir():
+        return modules
+    for level1 in sorted(p for p in source_root.iterdir() if p.is_dir()):
+        rel1 = level1.relative_to(ROOT)
+        if _discovery_is_ignored(rel1, patterns):
+            continue
+        if _discovery_has_source_files(level1, patterns):
+            modules.append({"name": level1.name, "path": rel1.as_posix(), "confidence": 0.4, "framework": "generic"})
+            continue
+        for level2 in sorted(p for p in level1.iterdir() if p.is_dir()):
+            rel2 = level2.relative_to(ROOT)
+            if _discovery_is_ignored(rel2, patterns):
+                continue
+            if _discovery_has_source_files(level2, patterns):
+                modules.append({"name": level2.name, "path": rel2.as_posix(), "confidence": 0.35, "framework": "generic"})
+    return modules
+
+
+def _discover_feature_modules(source_dirs: list[str]) -> tuple[list[dict], list[dict]]:
+    """Runs every framework detector across every configured source dir, then
+    falls back to the generic heuristic only for a source dir where no
+    framework detector found anything. Returns (modules, warnings); modules
+    are deduplicated by path (highest-confidence match wins), with a
+    duplicate_module_path warning when two different names claim one path."""
+    patterns = _discovery_gitignore_patterns()
+    warnings: list[dict] = []
+    by_path: dict[str, dict] = {}
+    for source_dir in source_dirs:
+        source_root = ROOT / source_dir
+        if not source_root.exists():
+            warnings.append({"kind": "source_root_missing", "detail": f"configured source dir does not exist: {source_dir}"})
+            continue
+        found = (
+            _discover_nestjs_modules(source_root, patterns)
+            + _discover_react_modules(source_root, patterns)
+            + _discover_python_packages(source_root, patterns)
+        )
+        if not found:
+            found = _discover_generic_modules(source_root, patterns)
+        for module in found:
+            existing = by_path.get(module["path"])
+            if existing and existing["name"] != module["name"]:
+                warnings.append({
+                    "kind": "duplicate_module_path",
+                    "detail": f"path '{module['path']}' discovered as both '{existing['name']}' and '{module['name']}'",
+                })
+            if not existing or module["confidence"] > existing["confidence"]:
+                by_path[module["path"]] = module
+    return list(by_path.values()), warnings
+
+
+def _extract_ts_relative_imports(file_path: Path) -> list[str]:
+    try:
+        text = file_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return []
+    specs: set[str] = set()
+    for pattern in (
+        r'''from\s+["'](\.[^"']+)["']''',
+        r'''\bimport\s+["'](\.[^"']+)["']''',
+        r'''require\(\s*["'](\.[^"']+)["']\s*\)''',
+    ):
+        specs.update(re.findall(pattern, text))
+    return sorted(specs)
+
+
+def _extract_python_imports(file_path: Path) -> list[tuple[str, int]]:
+    try:
+        tree = ast.parse(file_path.read_text(encoding="utf-8", errors="replace"))
+    except (SyntaxError, OSError, ValueError, RecursionError):
+        return []
+    specs: list[tuple[str, int]] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            specs.extend((alias.name, 0) for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            specs.append((node.module or "", node.level or 0))
+    return specs
+
+
+def _discovery_owning_module(rel_path: Path, path_to_name: dict[str, str]) -> str | None:
+    """Longest-path-prefix match: the most specific module claims a file."""
+    rel_str = rel_path.as_posix()
+    best: tuple[str, str] | None = None
+    for path, name in path_to_name.items():
+        if rel_str == path or rel_str.startswith(path + "/"):
+            if best is None or len(path) > len(best[0]):
+                best = (path, name)
+    return best[1] if best else None
+
+
+def _resolve_ts_dependency(file_path: Path, spec: str, path_to_name: dict[str, str]) -> tuple[str | None, float]:
+    target = (file_path.parent / spec).resolve()
+    try:
+        rel = target.relative_to(ROOT)
+    except ValueError:
+        return None, 0.0
+    name = _discovery_owning_module(rel, path_to_name)
+    return (name, 0.85) if name else (None, 0.0)
+
+
+def _resolve_python_dependency(
+    file_path: Path, spec: str, level: int, source_roots: list[Path], path_to_name: dict[str, str],
+) -> tuple[str | None, float]:
+    if level > 0:
+        base = file_path.parent
+        for _ in range(level - 1):
+            base = base.parent
+        target = base / Path(spec.replace(".", "/")) if spec else base
+        try:
+            rel = target.relative_to(ROOT)
+        except ValueError:
+            return None, 0.0
+        name = _discovery_owning_module(rel, path_to_name)
+        return (name, 0.85) if name else (None, 0.0)
+    if not spec:
+        return None, 0.0
+    parts = spec.split(".")
+    for root in source_roots:
+        candidate = root.joinpath(*parts)
+        try:
+            rel = candidate.relative_to(ROOT)
+        except ValueError:
+            continue
+        name = _discovery_owning_module(rel, path_to_name)
+        if name:
+            return name, 0.6
+    return None, 0.0
+
+
+def _discover_dependencies(modules: list[dict], source_roots: list[Path]) -> list[dict]:
+    """Best-effort internal dependency edges from relative TS/JS imports and
+    Python imports (relative, or absolute-but-resolving-inside a configured
+    source root). An import that cannot be resolved to a discovered/declared
+    module path -- an external package, a stdlib module, an unresolvable
+    absolute import -- is silently dropped rather than guessed at, per the
+    'do not invent relationships' requirement."""
+    path_to_name = {module["path"]: module["name"] for module in modules}
+    edges: dict[tuple[str, str], dict] = {}
+
+    def _record(source_name: str, target: str | None, confidence: float) -> None:
+        if not target or target == source_name or confidence <= 0:
+            return
+        key = (source_name, target)
+        if key not in edges or confidence > edges[key]["confidence"]:
+            edges[key] = {"from": source_name, "to": target, "kind": "source-import", "confidence": confidence}
+
+    for module in modules:
+        module_dir = ROOT / module["path"]
+        if not module_dir.is_dir():
+            continue
+        for file_path in module_dir.rglob("*"):
+            if not file_path.is_file():
+                continue
+            if file_path.suffix in DISCOVERY_TS_EXTENSIONS:
+                for spec in _extract_ts_relative_imports(file_path):
+                    target, confidence = _resolve_ts_dependency(file_path, spec, path_to_name)
+                    _record(module["name"], target, confidence)
+            elif file_path.suffix == ".py":
+                for spec, level in _extract_python_imports(file_path):
+                    target, confidence = _resolve_python_dependency(file_path, spec, level, source_roots, path_to_name)
+                    _record(module["name"], target, confidence)
+    return sorted(edges.values(), key=lambda edge: (edge["from"], edge["to"]))
+
+
+def _map_task_to_module(task: dict, modules: dict[str, dict]) -> str | None:
+    """Module a task belongs to, in the required priority order: (1) an
+    exact `task.context` match, (2) the most specific module whose path is a
+    prefix of (or glob-matches) one of `task.files`, (3) unmapped. Never a
+    substring/name comparison, which could match unrelated modules that
+    happen to share a word."""
+    context = task.get("context")
+    if context and context in modules:
+        return context
+    best: tuple[str, str] | None = None
+    for file_path in task.get("files") or []:
+        for name, info in modules.items():
+            path = info.get("path")
+            if not path:
+                continue
+            if file_path == path or file_path.startswith(path + "/") or fnmatch.fnmatch(file_path, path):
+                if best is None or len(path) > len(best[0]):
+                    best = (path, name)
+    return best[1] if best else None
+
+
+def _build_discovered_architecture() -> dict:
+    """Builds the discovered-architecture.json payload in memory. Declared
+    contexts are read as-is (and keep full override authority over name,
+    owner, path, dependencies -- nothing here mutates contexts.yaml);
+    discovered feature modules are attached underneath the declared context
+    whose path glob contains them, or flagged as unowned/out-of-context via
+    warnings when no declared context claims them."""
+    contexts = _load_contexts()
+    for name, info in contexts.items():
+        path_value = info.get("path")
+        if path_value is not None and not isinstance(path_value, str):
+            raise EngineError(f"invalid .ai-config/contexts.yaml: context '{name}' path must be a string glob, got {path_value!r}")
+
+    source_dirs = configured_source_dirs() or ["."]
+    modules_found, warnings = _discover_feature_modules(source_dirs)
+    source_roots = [ROOT / directory for directory in source_dirs]
+
+    contexts_out: dict[str, dict] = {}
+    for name, info in contexts.items():
+        contexts_out[name] = {
+            "path": info.get("path"),
+            "owner": info.get("owner"),
+            "depends_on": list(info.get("depends_on") or []),
+        }
+        if not info.get("owner"):
+            warnings.append({"kind": "module_missing_owner", "detail": f"declared context '{name}' has no owner"})
+        if not info.get("path"):
+            warnings.append({"kind": "invalid_glob", "detail": f"declared context '{name}' has no path glob"})
+        for dependency in info.get("depends_on") or []:
+            if dependency not in contexts:
+                warnings.append({"kind": "dangling_dependency", "detail": f"context '{name}' depends_on unknown context '{dependency}'"})
+
+    modules_out: dict[str, dict] = {}
+    for name, info in contexts_out.items():
+        modules_out[name] = {
+            "name": name, "path": info["path"], "owner": info["owner"],
+            "source": "declared", "kind": "bounded-context", "parent": None, "confidence": 1.0,
+        }
+    context_globs = [(info["path"], name, info.get("owner")) for name, info in contexts_out.items() if info.get("path")]
+
+    for module in sorted(modules_found, key=lambda m: m["path"]):
+        name = module["name"]
+        if name in modules_out:
+            original = name
+            counter = 2
+            while name in modules_out:
+                name = f"{original}-{counter}"
+                counter += 1
+            warnings.append({
+                "kind": "duplicate_module_path",
+                "detail": f"discovered module name '{original}' collides with an existing module; renamed to '{name}' (path {module['path']})",
+            })
+
+        parent = owner = None
+        for glob_path, context_name, context_owner in context_globs:
+            if fnmatch.fnmatch(module["path"], glob_path) or fnmatch.fnmatch(module["path"] + "/", glob_path):
+                parent, owner = context_name, context_owner
+                break
+        if parent is None:
+            warnings.append({"kind": "module_outside_context", "detail": f"discovered module '{name}' ({module['path']}) is not inside any declared bounded context"})
+        if not owner:
+            warnings.append({"kind": "module_missing_owner", "detail": f"discovered module '{name}' ({module['path']}) has no owner"})
+
+        modules_out[name] = {
+            "name": name, "path": module["path"], "owner": owner, "source": "discovered",
+            "kind": "feature", "parent": parent, "confidence": module["confidence"], "framework": module["framework"],
+        }
+
+    discovered_only = [m for m in modules_out.values() if m["source"] == "discovered"]
+    edges = _discover_dependencies(discovered_only, source_roots)
+    for edge in edges:
+        if edge["to"] not in modules_out:
+            warnings.append({"kind": "dangling_dependency", "detail": f"discovered dependency from '{edge['from']}' to unresolved module '{edge['to']}'"})
+    for name, info in contexts_out.items():
+        for dependency in info.get("depends_on") or []:
+            if dependency in contexts_out:
+                edges.append({"from": name, "to": dependency, "kind": "declared", "confidence": 1.0})
+
+    return {
+        "schema_version": ARCHITECTURE_DISCOVERY_SCHEMA_VERSION,
+        "generated_at": now(),
+        "contexts": contexts_out,
+        "modules": modules_out,
+        "edges": edges,
+        "warnings": warnings,
+    }
+
+
+def _discovered_architecture_with_tasks(state: dict | None) -> dict:
+    """Attaches task <-> module mapping (see `_map_task_to_module`) to a
+    freshly built discovered-architecture artifact. Only emits
+    module_without_tasks warnings when a workflow actually has tasks, so an
+    empty/uninitialized project is not flagged for a condition it cannot
+    yet meet."""
+    artifact = _build_discovered_architecture()
+    tasks = state["tasks"] if state else []
+    for name, info in artifact["modules"].items():
+        related = sorted({task["id"] for task in tasks if _map_task_to_module(task, artifact["modules"]) == name})
+        info["related_tasks"] = related
+        if tasks and not related and info["source"] == "discovered":
+            artifact["warnings"].append({"kind": "module_without_tasks", "detail": f"module '{name}' has no related task"})
+    return artifact
+
+
+def cmd_architecture_discover(args: argparse.Namespace) -> dict:
+    """`ai-kit architecture discover`: read-only scan producing
+    `.visualizer/discovered-architecture.json`. Never touches
+    `.ai-config/contexts.yaml` or any source file. Raises EngineError (exit
+    code 2) only for a genuinely invalid configuration (e.g. a hand-edited
+    contexts.yaml with a non-string path); an unreadable source file or an
+    unmatched framework convention is reported as a warning in the artifact
+    instead of failing the command."""
+    state_path_value = state_path(getattr(args, "state", None))
+    state = None
+    if state_path_value.exists():
+        state = load(state_path_value)
+        validate(state)
+    artifact = _discovered_architecture_with_tasks(state)
+    if VISUALIZER_DIR.exists():
+        (VISUALIZER_DIR / "discovered-architecture.json").write_text(
+            json.dumps(artifact, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+        )
+    return artifact
 
 
 def cmd_approve(args: argparse.Namespace) -> dict:
@@ -2155,10 +2841,13 @@ def cmd_pipeline(args: argparse.Namespace) -> dict:
     each dispatched to their own configured runner (see _dispatch_approval),
     which must render and record its own verdict; this command never
     fabricates one.
-    Resumable: if the task is already past dispatch (e.g. a previous run
-    stopped at a failed verify, or was rejected and re-completed), this
-    skips straight to the first unfinished phase instead of re-dispatching
-    the executor.
+    Synchronous: each phase blocks until the assigned runner returns; there is
+    no background scheduler or auto-trigger. Resume-capable: if the task is
+    already past dispatch (e.g. a previous run stopped at a failed verify, or
+    was rejected and re-completed), this skips straight to the first unfinished
+    phase instead of re-dispatching the executor. There is no automatic retry
+    across phases -- a stalled or failed phase stops here and reports why;
+    resume by re-running after fixing the cause.
     """
     state = load(state_path(args.state)); validate(state)
     task = task_map(state).get(args.id)
@@ -2380,7 +3069,7 @@ def cmd_verify(args: argparse.Namespace) -> dict:
     task = task_map(state).get(args.id)
     if not task:
         raise EngineError(f"unknown task: {args.id}")
-    report = {"task": task["id"], "checks": [], "passed": True, "inconclusive": False}
+    report = {"task": task["id"], "checks": [], "passed": True}
     print(f"Verifying task {task['id']}...", file=sys.stderr)
     manifest = _config_path("kit.yaml")
     executed_quality_checks = 0
@@ -2407,6 +3096,14 @@ def cmd_verify(args: argparse.Namespace) -> dict:
                     report["passed"] = False
                 report["checks"].append(check)
     if executed_quality_checks == 0:
+        # G2 requires evidence that the acceptance criteria actually hold. With
+        # every verification command left at kit.yaml's 'true' sentinel, nothing
+        # functional ran, so there is no such evidence -- reporting PASS here
+        # would let `pipeline` auto-approve QA, auto-approve review, and close
+        # the task on the strength of a secret-scan alone. Report it as
+        # inconclusive (not passed, but distinguishable from a real failure) so
+        # callers must either configure verification or approve manually with a
+        # human-supplied reason.
         warning = (
             "no test/lint/typecheck/build command is configured in .ai-config/kit.yaml "
             "(all are 'true' or missing) — verify only ran security gates and did "
@@ -2420,6 +3117,7 @@ def cmd_verify(args: argparse.Namespace) -> dict:
         # that auto-advance a task on verify success (post-completion
         # automation) must treat inconclusive the same as a failure.
         report["inconclusive"] = True
+        report["passed"] = False
         print(f"  WARNING: {warning}", file=sys.stderr)
     gates = ROOT / ".ai" / "scripts" / "check-gates.sh"
     if gates.exists():
@@ -2430,7 +3128,7 @@ def cmd_verify(args: argparse.Namespace) -> dict:
             check["stderr"] = result.stderr[-500:] if result.stderr else ""
             report["passed"] = False
         report["checks"].append(check)
-    verdict = "PASS" if report["passed"] else "FAIL"
+    verdict = "PASS" if report["passed"] else ("INCONCLUSIVE" if report.get("inconclusive") else "FAIL")
     print(f"Verification {verdict}. Use 'ai-kit approve {task['id']} --role qa' to finalize.", file=sys.stderr)
     return report
 
@@ -2477,6 +3175,9 @@ def parser() -> argparse.ArgumentParser:
     epic_list = epic_sub.add_parser("list"); epic_list.set_defaults(fn=cmd_epic_list)
     drift = sub.add_parser("drift"); drift.add_argument("id"); drift.set_defaults(fn=cmd_drift)
     onboard = sub.add_parser("onboard"); onboard.add_argument("--apply", action="store_true"); onboard.set_defaults(fn=cmd_onboard)
+    analyze = sub.add_parser("analyze"); analyze.set_defaults(fn=cmd_analyze)
+    architecture = sub.add_parser("architecture"); architecture_sub = architecture.add_subparsers(dest="architecture_command", required=True)
+    architecture_discover = architecture_sub.add_parser("discover"); architecture_discover.set_defaults(fn=cmd_architecture_discover)
     show = sub.add_parser("show"); show.set_defaults(fn=cmd_show)
     valid = sub.add_parser("validate"); valid.set_defaults(fn=lambda args: (validate(load(state_path(args.state))) or {"valid": True}))
     return root
@@ -2487,6 +3188,15 @@ def main() -> int:
     try:
         output = args.fn(args)
         print(output if isinstance(output, str) else json.dumps(output, indent=2))
+        # `verify` reports a verdict rather than raising, so returning 0
+        # unconditionally made it useless as a shell gate: dispatch-full.sh's
+        # `if ! ai-kit verify ...` never fired, and a task whose checks FAILED
+        # was auto-approved through QA and review and closed. The full report
+        # is still printed either way; only the exit status changes, so a
+        # caller reading stdout is unaffected while `if !`/`&&`/`set -e` now
+        # behave the way any shell author would assume.
+        if isinstance(output, dict) and args.fn is cmd_verify and not output.get("passed"):
+            return 1
         return 0
     except EngineError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)

@@ -286,6 +286,13 @@
     .mod-owner-dot { width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; }
     .mod-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .mod-path { font-family: var(--mono); font-size: 9px; color: var(--text-dim); }
+    .mod-src-tag {
+      margin-left: 6px; padding: 1px 5px; border-radius: 4px;
+      font-size: 8px; font-weight: 700; text-transform: uppercase;
+      letter-spacing: .03em; vertical-align: middle;
+    }
+    .mod-src-declared { background: rgba(56,189,248,.12); color: var(--cyan); }
+    .mod-src-discovered { background: rgba(245,158,11,.12); color: var(--amber); }
 
     /* ── Stats row ── */
     .stats-row { display: grid; grid-template-columns: repeat(3,1fr); gap: 6px; }
@@ -384,6 +391,23 @@
       border: 1px solid rgba(56,189,248,.3);
     }
     .chip-sep { width: 1px; height: 18px; background: var(--border); }
+
+    /* Module filter bar (sidebar left, above the module tree) */
+    .mod-filter-bar {
+      display: flex; gap: 6px; align-items: center;
+      padding: 8px 12px 6px;
+    }
+    .mod-filter-select {
+      display: block;
+      width: calc(100% - 24px);
+      margin: 0 12px 8px;
+      background: rgba(255,255,255,.03);
+      border: 1px solid var(--border);
+      color: var(--text-sub);
+      font-size: 11px;
+      border-radius: 6px;
+      padding: 4px 6px;
+    }
 
     /* Minimap */
     .minimap {

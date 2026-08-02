@@ -172,6 +172,37 @@ raised before claiming any task, pointing at explicit `dispatch` as the
 alternative. A missing or misconfigured default pair, unknown model, or
 ambiguous multi-model runner also fails before claiming any task.
 
+## Project Analyzer / Knowledge Graph Builder
+
+`ai-kit analyze` is read-only and takes no task/workflow input: it combines
+`onboard`'s stack/container-runtime detection with the module and ownership
+graph declared in `.ai-config/contexts.yaml`, plus a short list of
+static-analysis risk signals (`unowned_context`: a registered context with no
+`owner`; `dangling_dependency`: a `depends_on` entry naming a context that
+doesn't exist, which can only happen via a hand-edit since `context add`
+validates this at write time; `no_verification_command`: nothing detected for
+`kit.yaml`'s test/lint/build commands). It writes
+`.ai-work/analysis/project-summary.json` (`schema_version: 1`) on every call
+and also returns the same dict, mirroring `onboard`'s existing proposal
+shape. The "knowledge graph" here is exactly what `contexts.yaml` declares --
+not a parser for arbitrary source languages; see AGENTS.md's Platform
+Capability Map for the scope boundary.
+
+## Visualizer artifact versioning
+
+`ai-kit visualizer generate` writes `.visualizer/artifacts.json` alongside
+`board.json`, `architecture.json`, `impact.json`, `events.json`, and
+`dag.json`: `{"schema_version": 1, "generated_at": ..., "artifacts": {
+"board.json": 1, "architecture.json": 1, "impact.json": 1, "events.json": 1,
+"dag.json": 1}}`. It is the one file a consumer checks for compatibility
+before parsing the rest -- the individual payloads are keyed by task id,
+context name, or a fixed field set (read directly by `app.js`/`dag.html`,
+pinned in `tests/test_visualizer_contract.py`) and never carry the version
+field themselves. `_validate_visualizer_manifest` rejects a manifest missing
+or mistyping `schema_version` or `artifacts`. See AGENTS.md's "Artifact
+Schema Versioning" for how this relates to `workflow.json`'s own `version`
+and the task handoff's `schema_version`.
+
 `dispatch`'s prompt to the runner references the tasks file and instructs
 the completion command using the *resolved* workspace for the `--state`
 this dispatch call used (`workspace(state_path(args.state))`), not a

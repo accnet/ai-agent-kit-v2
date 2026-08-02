@@ -14,6 +14,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import textwrap
 import unittest
 from pathlib import Path
 
@@ -456,6 +457,65 @@ class DagPayloadTests(EngineTestCase):
         self.assertEqual(dag["waves"], 3)
 
 
+class VisualizerManifestTests(EngineTestCase):
+    """.visualizer/artifacts.json is the schema-version manifest a consumer
+    checks before parsing board/architecture/impact/events/dag.json -- see
+    AGENTS.md's 'Artifact Schema Versioning'. Unlike EngineTestCase's default
+    VISUALIZER_DIR (deliberately nonexistent so most tests never touch disk),
+    these tests point it at a real temp directory to exercise the actual
+    write path."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        ai_kit.VISUALIZER_DIR = self.root / ".visualizer"
+        ai_kit.VISUALIZER_DIR.mkdir(parents=True, exist_ok=True)
+
+    def _manifest(self) -> dict:
+        return json.loads((ai_kit.VISUALIZER_DIR / "artifacts.json").read_text(encoding="utf-8"))
+
+    def test_manifest_written_when_no_workflow_state_exists_yet(self) -> None:
+        ai_kit._generate_visualizer_data(str(self.state_file))
+        manifest = self._manifest()
+        self.assertEqual(manifest["schema_version"], ai_kit.VISUALIZER_MANIFEST_SCHEMA_VERSION)
+        self.assertEqual(manifest["artifacts"], ai_kit.VISUALIZER_ARTIFACT_VERSIONS)
+
+    def test_manifest_written_alongside_real_payloads(self) -> None:
+        self.init_workflow()
+        self.add_task("T0")
+        payloads = ai_kit._generate_visualizer_data(str(self.state_file))
+        self.assertIn("artifacts.json", payloads)
+        manifest = self._manifest()
+        self.assertEqual(manifest["artifacts"], ai_kit.VISUALIZER_ARTIFACT_VERSIONS)
+
+    def test_manifest_lists_exactly_the_other_generated_payloads(self) -> None:
+        """Every artifact the manifest names must be a file the generator
+        actually writes, and vice versa -- otherwise the manifest could drift
+        from reality on either side."""
+        self.init_workflow()
+        payloads = ai_kit._generate_visualizer_data(str(self.state_file))
+        written = set(payloads) - {"artifacts.json"}
+        self.assertEqual(written, set(ai_kit.VISUALIZER_ARTIFACT_VERSIONS))
+
+    def test_validator_rejects_missing_schema_version(self) -> None:
+        with self.assertRaises(ai_kit.EngineError):
+            ai_kit._validate_visualizer_manifest({"artifacts": {"dag.json": 1}})
+
+    def test_validator_rejects_non_int_schema_version(self) -> None:
+        with self.assertRaises(ai_kit.EngineError):
+            ai_kit._validate_visualizer_manifest({"schema_version": "1", "artifacts": {"dag.json": 1}})
+
+    def test_validator_rejects_empty_artifacts(self) -> None:
+        with self.assertRaises(ai_kit.EngineError):
+            ai_kit._validate_visualizer_manifest({"schema_version": 1, "artifacts": {}})
+
+    def test_validator_rejects_non_int_artifact_version(self) -> None:
+        with self.assertRaises(ai_kit.EngineError):
+            ai_kit._validate_visualizer_manifest({"schema_version": 1, "artifacts": {"dag.json": "1"}})
+
+    def test_validator_accepts_the_real_manifest(self) -> None:
+        ai_kit._validate_visualizer_manifest(ai_kit._visualizer_manifest())
+
+
 class RoutingAndSkillMetadataTests(EngineTestCase):
     def _write_skill(self, relative: str) -> None:
         skill_dir = self.root / relative
@@ -818,6 +878,473 @@ class SkillContentTests(unittest.TestCase):
         self.assertEqual(flagged, [], f"Placeholder content found in: {flagged}")
 
 
+class UnterminatedListGuardTests(EngineTestCase):
+    """Every YAML reader here is line-based, so a `[...]` array wrapped onto
+    a second line is not unsupported-but-obvious: it is silently stored as
+    the first line's raw text, and the affected trigger/role simply stops
+    matching with no error. These assert it now raises instead."""
+
+    def _registry(self, body: str) -> None:
+        (self.root / ".ai-config" / "registry.yaml").write_text(body, encoding="utf-8")
+
+    def test_wrapped_trigger_match_list_raises(self) -> None:
+        self._registry(
+            "skill_triggers:\n"
+            "  demo:\n"
+            '    match: ["one", "two",\n'
+            '            "three"]\n'
+            '    core_skills: ["security-review"]\n'
+        )
+        with self.assertRaises(ai_kit.EngineError) as ctx:
+            ai_kit._load_skill_triggers()
+        self.assertIn("demo.match", str(ctx.exception))
+        self.assertIn("one line", str(ctx.exception))
+
+    def test_wrapped_owners_list_raises(self) -> None:
+        """A wrapped owners list used to fail the regex and drop the role
+        entirely, so that role silently routed no technology skills."""
+        self._registry("owners:\n  backend: [backend,\n            database]\n")
+        with self.assertRaises(ai_kit.EngineError) as ctx:
+            ai_kit._load_registry()
+        self.assertIn("owners.backend", str(ctx.exception))
+
+    def test_wrapped_skill_meta_list_raises(self) -> None:
+        skill_dir = self.root / ".ai" / "skills" / "backend" / "demo"
+        skill_dir.mkdir(parents=True, exist_ok=True)
+        (skill_dir / "skill.meta.yaml").write_text(
+            "name: demo\ndomain: backend\ndocuments: [overview.md,\n           patterns.md]\n",
+            encoding="utf-8",
+        )
+        with self.assertRaises(ai_kit.EngineError) as ctx:
+            ai_kit._load_skill_metadata(skill_dir)
+        self.assertIn("documents", str(ctx.exception))
+
+    def test_single_line_lists_still_parse(self) -> None:
+        self._registry(
+            "skill_triggers:\n"
+            "  demo:\n"
+            '    match: ["one", "two", "three"]\n'
+            '    core_skills: ["security-review"]\n'
+        )
+        triggers = ai_kit._load_skill_triggers()
+        self.assertEqual(triggers["demo"]["match"], ["one", "two", "three"])
+
+
+class VerificationGateTests(EngineTestCase):
+    """G2 requires evidence the acceptance criteria hold. With every
+    verification command left at kit.yaml's 'true' sentinel, nothing
+    functional runs -- verify used to report passed=True on the strength of
+    a secret scan alone, which let `pipeline` auto-approve QA, auto-approve
+    review, and close the task with no functional evidence at all."""
+
+    def _kit_yaml(self, verification: str) -> None:
+        (self.root / ".ai-config" / "kit.yaml").write_text(
+            f"project:\n  stack: []\n\nverification:\n{verification}", encoding="utf-8"
+        )
+
+    def _task_at_implementation_complete(self) -> None:
+        self.init_workflow()
+        self.add_task("T1")
+        self.transition("T1", "start", actor="backend")
+        self.transition("T1", "complete", actor="backend")
+
+    def test_no_configured_checks_is_inconclusive_not_passed(self) -> None:
+        self._kit_yaml(
+            "  test_command: true\n  typecheck_command: true\n"
+            "  build_command: true\n  lint_command: true\n"
+        )
+        self._task_at_implementation_complete()
+        report = ai_kit.cmd_verify(ns(state=str(self.state_file), id="T1"))
+        self.assertFalse(report["passed"])
+        self.assertTrue(report["inconclusive"])
+        self.assertIn("warning", report)
+        self.assertTrue(all(c["status"] == "skipped" for c in report["checks"]
+                            if c["name"].endswith("_command")))
+
+    def test_a_configured_passing_check_is_conclusive(self) -> None:
+        self._kit_yaml(
+            "  test_command: true\n  typecheck_command: true\n"
+            "  build_command: true\n  lint_command: exit 0\n"
+        )
+        self._task_at_implementation_complete()
+        report = ai_kit.cmd_verify(ns(state=str(self.state_file), id="T1"))
+        self.assertTrue(report["passed"])
+        self.assertNotIn("inconclusive", report)
+
+    def test_a_configured_failing_check_fails_not_inconclusive(self) -> None:
+        """A real failure must stay distinguishable from 'nothing ran'."""
+        self._kit_yaml(
+            "  test_command: exit 1\n  typecheck_command: true\n"
+            "  build_command: true\n  lint_command: true\n"
+        )
+        self._task_at_implementation_complete()
+        report = ai_kit.cmd_verify(ns(state=str(self.state_file), id="T1"))
+        self.assertFalse(report["passed"])
+        self.assertNotIn("inconclusive", report)
+
+
+class VerifyExitCodeTests(unittest.TestCase):
+    """`ai-kit verify` must exit non-zero unless the report says passed.
+
+    It used to exit 0 for every verdict, because main() only returns non-zero
+    on EngineError and cmd_verify reports a verdict rather than raising. That
+    made it useless as a shell gate: dispatch-full.sh's
+    `if ! "$AI_KIT" verify ...` never fired, so a task whose checks FAILED was
+    auto-approved through QA and review and closed at `done` -- the same
+    vacuous-gate bug already fixed inside `pipeline`, but in the shell path.
+
+    Driven through the real CLI (subprocess), since the exit code is the whole
+    point and an in-process call to cmd_verify would not exercise it.
+    """
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name)
+        for role in ("planner", "backend", "qa", "reviewer"):
+            (self.root / ".ai" / "agents" / role).mkdir(parents=True, exist_ok=True)
+        (self.root / ".ai" / "workflows" / "feature").mkdir(parents=True, exist_ok=True)
+        (self.root / ".ai" / "engine").mkdir(parents=True, exist_ok=True)
+        (self.root / ".ai" / "engine" / "ai_kit.py").write_bytes(
+            (ENGINE_DIR / "ai_kit.py").read_bytes())
+        (self.root / ".ai-config").mkdir(parents=True, exist_ok=True)
+        self.state = self.root / "work" / "state" / "workflow.json"
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def _run(self, *args: str) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            [sys.executable, str(self.root / ".ai" / "engine" / "ai_kit.py"),
+             "--state", str(self.state), *args],
+            capture_output=True, text=True, cwd=str(self.root),
+        )
+
+    def _prepare(self, verification: str) -> None:
+        (self.root / ".ai-config" / "kit.yaml").write_text(
+            f"project:\n  stack: []\n\nverification:\n{verification}", encoding="utf-8")
+        self._run("init", "--title", "t", "--workflow", "feature", "--actor", "planner")
+        self._run("add-task", "T1", "--title", "t", "--owner", "backend",
+                  "--phase", "build", "--acceptance", "ok")
+        self._run("transition", "T1", "start", "--actor", "backend")
+        self._run("transition", "T1", "complete", "--actor", "backend")
+
+    def test_exits_zero_when_passed(self) -> None:
+        self._prepare("  test_command: exit 0\n  typecheck_command: true\n"
+                      "  build_command: true\n  lint_command: true\n")
+        result = self._run("verify", "T1")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('"passed": true', result.stdout)
+
+    def test_exits_nonzero_when_a_check_fails(self) -> None:
+        self._prepare("  test_command: exit 1\n  typecheck_command: true\n"
+                      "  build_command: true\n  lint_command: true\n")
+        result = self._run("verify", "T1")
+        self.assertNotEqual(result.returncode, 0,
+                            "verify reported FAIL but exited 0; every shell gate on it is a no-op")
+        self.assertIn('"passed": false', result.stdout)
+
+    def test_exits_nonzero_when_inconclusive(self) -> None:
+        """Nothing functional ran, so there is no G2 evidence to proceed on."""
+        self._prepare("  test_command: true\n  typecheck_command: true\n"
+                      "  build_command: true\n  lint_command: true\n")
+        result = self._run("verify", "T1")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('"inconclusive": true', result.stdout)
+
+    def test_report_is_still_printed_in_full_on_failure(self) -> None:
+        """The exit code changed; the stdout contract did not."""
+        self._prepare("  test_command: exit 1\n  typecheck_command: true\n"
+                      "  build_command: true\n  lint_command: true\n")
+        report = json.loads(self._run("verify", "T1").stdout)
+        self.assertEqual(report["task"], "T1")
+        self.assertTrue(report["checks"])
+
+    def test_other_commands_still_exit_zero(self) -> None:
+        """Only verify's exit status is verdict-dependent."""
+        self._prepare("  test_command: exit 1\n  typecheck_command: true\n"
+                      "  build_command: true\n  lint_command: true\n")
+        for command in (("show",), ("ready",), ("status",), ("timeline",)):
+            with self.subTest(command=command[0]):
+                self.assertEqual(self._run(*command).returncode, 0)
+
+
+class ContainerRuntimeDetectionTests(EngineTestCase):
+    """`onboard` resolves where services -- notably the database -- actually
+    run, by reading the repo.
+
+    Whether the database is a Compose service or a host process decides where
+    a migration executes and which host a connection string should point at.
+    That is discoverable, so it belongs in configuration resolved once at
+    onboard time rather than in a question repeated on every task.
+    """
+
+    def _write(self, name: str, body: str) -> None:
+        (self.root / name).write_text(textwrap.dedent(body), encoding="utf-8")
+
+    def test_no_compose_file_reports_no_container_database(self) -> None:
+        runtime = ai_kit._detect_container_runtime()
+        self.assertIsNone(runtime["compose_file"])
+        self.assertFalse(runtime["database_in_compose"])
+        self.assertEqual(runtime["database_services"], [])
+
+    def test_detects_postgres_service_in_compose(self) -> None:
+        self._write("docker-compose.yml", """\
+            services:
+              api:
+                build: .
+              db:
+                image: postgres:16.2
+            """)
+        runtime = ai_kit._detect_container_runtime()
+        self.assertEqual(runtime["compose_file"], "docker-compose.yml")
+        self.assertTrue(runtime["database_in_compose"])
+        self.assertEqual(
+            runtime["database_services"],
+            [{"service": "db", "image": "postgres:16.2", "technology": "postgresql"}],
+        )
+
+    def test_detects_multiple_datastores_and_alternate_filename(self) -> None:
+        self._write("compose.yaml", """\
+            services:
+              store:
+                image: mariadb:11
+              cache:
+                image: redis:7-alpine
+            """)
+        runtime = ai_kit._detect_container_runtime()
+        self.assertEqual(runtime["compose_file"], "compose.yaml")
+        self.assertEqual(
+            sorted(s["technology"] for s in runtime["database_services"]),
+            ["mysql", "redis"],
+        )
+
+    def test_app_only_compose_is_not_reported_as_a_database(self) -> None:
+        self._write("docker-compose.yml", """\
+            services:
+              web:
+                image: nginx:alpine
+            """)
+        runtime = ai_kit._detect_container_runtime()
+        self.assertTrue(runtime["compose_file"])
+        self.assertFalse(runtime["database_in_compose"])
+
+    def test_onboard_puts_detected_runtime_into_the_stack(self) -> None:
+        """The stack is what actually routes skills, so detection is only
+        useful if it lands there."""
+        self._write("docker-compose.yml", """\
+            services:
+              db:
+                image: postgres:16.2
+            """)
+        (self.root / "package.json").write_text('{"name":"x"}', encoding="utf-8")
+        proposal = ai_kit.cmd_onboard(ns(apply=False))
+        self.assertIn("docker", proposal["stack"])
+        self.assertIn("compose", proposal["stack"])
+        self.assertIn("postgresql", proposal["stack"])
+        self.assertTrue(proposal["container_runtime"]["database_in_compose"])
+
+
+class ProjectAnalyzerTests(EngineTestCase):
+    """`ai-kit analyze` (Project Analyzer + Knowledge Graph Builder): a
+    read-only snapshot combining onboard's stack/runtime detection with the
+    module/ownership graph declared in contexts.yaml, plus static-analysis
+    risk signals. Deliberately scoped to what contexts.yaml declares -- not a
+    language-aware code analyzer."""
+
+    def _add_context(self, name: str, path: str = "src/*", owner: str = "backend",
+                      depends_on: list[str] | None = None, force: bool = False) -> dict:
+        return ai_kit.cmd_context_add(argparse.Namespace(
+            state=str(self.state_file), name=name, path=path, owner=owner,
+            depends_on=depends_on, force=force,
+        ))
+
+    def _analyze(self) -> dict:
+        return ai_kit.cmd_analyze(ns(state=str(self.state_file)))
+
+    def test_empty_registry_yields_empty_graph_with_no_risks(self) -> None:
+        summary = self._analyze()
+        self.assertEqual(summary["modules"], {})
+        self.assertEqual(summary["ownership"], {})
+        self.assertEqual(summary["schema_version"], ai_kit.ANALYZE_SCHEMA_VERSION)
+
+    def test_modules_and_ownership_reflect_registered_contexts(self) -> None:
+        self._add_context("ordering", path="src/ordering/*", owner="backend")
+        self._add_context("ui", path="src/ui/*", owner="frontend")
+        summary = self._analyze()
+        self.assertEqual(summary["modules"]["ordering"]["owner"], "backend")
+        self.assertEqual(summary["modules"]["ordering"]["path"], "src/ordering/*")
+        self.assertEqual(summary["ownership"]["backend"], ["ordering"])
+        self.assertEqual(summary["ownership"]["frontend"], ["ui"])
+
+    def test_dependency_appears_in_module_graph(self) -> None:
+        self._add_context("core", owner="backend")
+        self._add_context("api", owner="backend", depends_on=["core"])
+        summary = self._analyze()
+        self.assertEqual(summary["modules"]["api"]["depends_on"], ["core"])
+        self.assertEqual(summary["risks"], [
+            {"kind": "no_verification_command",
+             "detail": "no test/lint/build command detected; verify will report inconclusive"},
+        ])
+
+    def test_unowned_context_is_flagged_as_a_risk(self) -> None:
+        path = self.root / ".ai-config" / "contexts.yaml"
+        path.write_text("contexts:\n  legacy:\n    path: legacy/*\n", encoding="utf-8")
+        summary = self._analyze()
+        risk_kinds = {r["kind"] for r in summary["risks"]}
+        self.assertIn("unowned_context", risk_kinds)
+
+    def test_dangling_dependency_is_flagged_as_a_risk(self) -> None:
+        """cmd_context_add's own cycle/existence checks stop this via the
+        CLI, but contexts.yaml is a hand-editable YAML file, so a
+        static-analysis pass must catch a dependency left dangling by a
+        manual edit -- not assume the registry was only ever built through
+        the CLI."""
+        path = self.root / ".ai-config" / "contexts.yaml"
+        path.write_text(
+            "contexts:\n  api:\n    path: src/api/*\n    owner: backend\n"
+            "    depends_on: [ghost]\n",
+            encoding="utf-8",
+        )
+        summary = self._analyze()
+        dangling = [r for r in summary["risks"] if r["kind"] == "dangling_dependency"]
+        self.assertEqual(len(dangling), 1)
+        self.assertEqual(dangling[0]["context"], "api")
+
+    def test_missing_verification_command_is_flagged_as_a_risk(self) -> None:
+        summary = self._analyze()
+        self.assertTrue(any(r["kind"] == "no_verification_command" for r in summary["risks"]))
+
+    def test_summary_is_persisted_under_the_workspace(self) -> None:
+        self._analyze()
+        written = json.loads((self.root / "work" / "analysis" / "project-summary.json").read_text(encoding="utf-8"))
+        self.assertEqual(written["schema_version"], ai_kit.ANALYZE_SCHEMA_VERSION)
+
+    def test_stack_and_container_runtime_come_from_onboard_detection(self) -> None:
+        (self.root / "package.json").write_text('{"name":"x"}', encoding="utf-8")
+        summary = self._analyze()
+        self.assertIn("node", summary["stack"])
+        self.assertIn("dockerfile", summary["container_runtime"])
+
+
+class StackSkillsRoutingTests(EngineTestCase):
+    """registry.yaml's `stack_skills:` maps a skill to the stack tags that
+    should select it. Nothing read it, so routing matched a technology skill
+    only by its own directory name or domain -- leaving every skill whose name
+    differs from its tag (docker-compose-local, nestjs-core, react-vite, ...)
+    unreachable through `kit.yaml project.stack`."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        ai_kit.ROOT = REPO_ROOT
+
+    def test_stack_skills_section_is_parsed(self) -> None:
+        mapping = ai_kit._load_stack_skills()
+        self.assertTrue(mapping, "stack_skills parsed as empty; the format likely changed")
+        self.assertEqual(mapping[".ai/skills/devops/docker-compose-local"], ["docker", "compose"])
+
+    def test_tag_selects_a_skill_whose_directory_name_differs(self) -> None:
+        self.init_workflow()
+        self.add_task("T1", title="Set up the local compose stack", owner="devops",
+                      tags=["docker", "compose"])
+        details = ai_kit.cmd_route(ns(state=str(self.state_file), id="T1", explain=False))
+        selected = [d for d in details["skill_details"]
+                    if "docker-compose-local" in d["entrypoint"]]
+        self.assertTrue(selected, f"docker-compose-local not routed: {details['skills']}")
+        self.assertTrue(any(r.startswith("stack:") for r in selected[0]["selection_reasons"]))
+
+    def test_pgvector_is_not_pulled_in_by_plain_postgresql(self) -> None:
+        """pgvector declared `postgresql` as one of its tags, so implementing
+        stack_skills verbatim would hand a Postgres extension to every plain
+        Postgres project."""
+        mapping = ai_kit._load_stack_skills()
+        self.assertNotIn("postgresql", mapping[".ai/skills/database/pgvector"])
+
+
+class DatabaseChangeRoutingTests(EngineTestCase):
+    """data-migration carries the G1 plan requirement and the G5 destructive-op
+    discipline, but had no trigger: it reached only tasks already owned by the
+    database role, so a backend-owned migration task got none of it."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        ai_kit.ROOT = REPO_ROOT
+
+    def _skills(self, title: str, owner: str) -> list[str]:
+        self.add_task(f"T{abs(hash(title)) % 9999}", title=title, owner=owner)
+        task_id = self.last_task_id
+        return ai_kit.cmd_route(ns(state=str(self.state_file), id=task_id, explain=False))["skills"]
+
+    def add_task(self, task_id: str, **kwargs):  # type: ignore[override]
+        self.last_task_id = task_id
+        return super().add_task(task_id, **kwargs)
+
+    def test_backend_owned_migration_task_gets_data_migration(self) -> None:
+        self.init_workflow()
+        skills = self._skills("Add a migration to drop the legacy users table", "backend")
+        self.assertTrue(any("data-migration" in s for s in skills),
+                        f"data-migration not routed to a backend migration task: {skills}")
+
+    def test_backfill_and_seed_also_route(self) -> None:
+        self.init_workflow()
+        for title in ("Backfill the normalized_status column",
+                      "Add seed data for the demo tenant"):
+            with self.subTest(title=title):
+                skills = self._skills(title, "backend")
+                self.assertTrue(any("data-migration" in s for s in skills), skills)
+
+    def test_unrelated_task_does_not_get_data_migration(self) -> None:
+        self.init_workflow()
+        skills = self._skills("Fix a typo in the order confirmation email", "backend")
+        self.assertFalse(any("data-migration" in s for s in skills), skills)
+
+
+class DataMigrationContentTests(unittest.TestCase):
+    """The skill must tell the agent to establish the migration target from the
+    repo rather than assume it (or interrogate the user about it)."""
+
+    SKILL = REPO_ROOT / ".ai" / "skills" / "core" / "data-migration" / "SKILL.md"
+
+    def test_covers_identifying_the_target_database(self) -> None:
+        text = self.SKILL.read_text(encoding="utf-8").lower()
+        for token in ("database_url", "compose", "host and port", "inside the container"):
+            with self.subTest(token=token):
+                self.assertIn(token, text)
+
+    def test_target_confirmation_is_in_the_checklist(self) -> None:
+        text = self.SKILL.read_text(encoding="utf-8").lower()
+        checklist = text.split("## checklist", 1)[1].split("##", 1)[0]
+        self.assertIn("target database identified", checklist)
+
+
+class LocalScriptContractTests(unittest.TestCase):
+    """The helper scripts in .ai/scripts/ are the kit's local QA surface."""
+
+    SCRIPTS = REPO_ROOT / ".ai" / "scripts"
+
+    def test_new_task_and_next_task_are_not_duplicates(self) -> None:
+        """new-task.sh used to be a byte-for-byte duplicate of next-task.sh:
+        it ran `ai-kit ready`, listing existing work and creating nothing,
+        despite its name."""
+        new_task = (self.SCRIPTS / "new-task.sh").read_text(encoding="utf-8")
+        next_task = (self.SCRIPTS / "next-task.sh").read_text(encoding="utf-8")
+        self.assertNotEqual(new_task, next_task)
+        self.assertIn("add-task", new_task, "new-task.sh should create a task")
+        self.assertIn("ready", next_task, "next-task.sh should list ready work")
+
+    def test_new_task_rejects_missing_arguments(self) -> None:
+        result = subprocess.run(["bash", str(self.SCRIPTS / "new-task.sh"), "T9"],
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("usage:", result.stderr)
+
+    def test_dispatch_full_gates_on_the_verify_verdict(self) -> None:
+        """Guards the fix: the script must not treat verify's output as a
+        pass without checking it."""
+        script = (self.SCRIPTS / "dispatch-full.sh").read_text(encoding="utf-8")
+        self.assertIn('"passed": true', script,
+                      "dispatch-full.sh must inspect the verify verdict, not just its exit code")
+
+
 class RealRegistryTriggerTests(unittest.TestCase):
     """Exercises the REAL .ai-config/registry.yaml and its install-template
     copy, not a synthetic fixture -- because the bug this guards against
@@ -986,6 +1513,22 @@ class RegistryEndToEndRoutingTests(EngineTestCase):
         skills = self._route("T1")["skills"]
         self.assertTrue(any("performance-profiling" in s for s in skills), skills)
         self.assertFalse(any("/ai/" in s for s in skills), f"unexpected AI skills: {skills}")
+
+    def test_planner_owned_task_routes_to_requirement_decomposer(self) -> None:
+        """Task decomposition is a base planner responsibility, loaded
+        unconditionally like requirements-intake -- not something a keyword
+        trigger should gate."""
+        self.init_workflow()
+        self.add_task("T1", title="Break the checkout redesign brief into tasks", owner="planner")
+        skills = self._route("T1")["skills"]
+        self.assertTrue(any("requirement-decomposer" in s for s in skills), skills)
+        self.assertTrue(any("requirements-intake" in s for s in skills), skills)
+
+    def test_architect_owned_task_routes_to_system_designer(self) -> None:
+        self.init_workflow()
+        self.add_task("T1", title="Define module boundaries for the new billing service", owner="architect")
+        skills = self._route("T1")["skills"]
+        self.assertTrue(any("system-designer" in s for s in skills), skills)
 
     def test_llm_cost_task_still_pulls_ai_skills(self) -> None:
         self.init_workflow()

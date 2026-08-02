@@ -16,7 +16,7 @@ core_skills:
   path: .ai/skills/core
   source: v1-adapted
   contract: SKILL.md plus v2 adapter documents
-  names: [accessibility, api-contract, architecture-decisions, code-review, contract-testing, data-migration, debugging, dependency-management, deployment-infra, documentation-maintenance, e2e-testing, frontend-core, github-actions-ci, integration-contracts, nodejs-api-core, observability, performance-profiling, refactoring, release-management, requirements-intake, security-review, skill-router, test-and-validation, threat-modeling, webhooks-and-retries, workflow-orchestration]
+  names: [accessibility, api-contract, architecture-decisions, code-review, contract-testing, data-migration, debugging, dependency-management, deployment-infra, documentation-maintenance, e2e-testing, frontend-core, github-actions-ci, integration-contracts, nodejs-api-core, observability, performance-profiling, refactoring, release-management, requirement-decomposer, requirements-intake, security-review, skill-router, system-designer, test-and-validation, threat-modeling, webhooks-and-retries, workflow-orchestration]
 
 stack_skills:
   nestjs-core: {path: .ai/skills/backend/nestjs-core, stack: [nestjs]}
@@ -32,7 +32,7 @@ stack_skills:
   frontend-tailwind: {path: .ai/skills/frontend/tailwind, stack: [tailwind]}
   testing-pytest: {path: .ai/skills/testing/pytest, stack: [pytest, python]}
   testing-playwright: {path: .ai/skills/testing/playwright, stack: [playwright]}
-  database-pgvector: {path: .ai/skills/database/pgvector, stack: [postgresql, pgvector, rag]}
+  database-pgvector: {path: .ai/skills/database/pgvector, stack: [pgvector, rag]}
   database-qdrant: {path: .ai/skills/database/qdrant, stack: [qdrant, rag]}
   devops-terraform: {path: .ai/skills/devops/terraform, stack: [terraform]}
   devops-prometheus: {path: .ai/skills/devops/prometheus, stack: [prometheus, observability]}
@@ -49,18 +49,24 @@ stack_skills:
   ai-ai-cost-management: {path: .ai/skills/ai/ai-cost-management, stack: [cost, llm, ai]}
 
 skill_triggers:
-  # AGENTS.md's mandatory-concerns table (the general one, not the AI-specific
-  # table below it) had no trigger implementing three of its rows: auth,
-  # UI interaction, and new/upgraded dependencies never actually routed to
-  # Security/Frontend/DevOps regardless of task content. These three close
-  # that gap.
+  # These implement AGENTS.md's two routing tables. Six of the ten rows in the
+  # general mandatory-concerns table originally had no trigger at all, so the
+  # concern was declared normative but never enforced: auth, UI interaction,
+  # dependency changes, parallel/handoff work, user-journey/API boundaries, and
+  # cross-cutting trade-offs simply never routed. Ship/deploy and documentation
+  # additionally only worked when the task already happened to be owned by the
+  # release/document role, so a backend-owned deploy task got nothing.
+  #
+  # tests/test_agents_conformance.py parses both tables out of AGENTS.md and
+  # fails if any row stops being reachable, so a new row cannot be documented
+  # here as mandatory without an implementation behind it.
   auth-security:
     match: ["auth", "oauth", "login", "logout", "sso", "jwt", "password", "credential", "permission", "authoriz", "rbac", "session token", "access token", "refresh token", "sensitive data", "pii", "untrusted input", "encryption"]
     core_skills: ["security-review", "threat-modeling"]
     technology_skills: []
     reason: "Auth, permissions, credentials, or sensitive/untrusted data require a security review pass (AGENTS.md mandatory concerns)."
   ui-interaction:
-    match: ["ui component", "button", "modal", "dialog", "dropdown", "form field", "accessibility", "aria", "screen reader", "keyboard navigation", "responsive layout"]
+    match: ["ui interaction", "ui change", "ui component", "button", "modal", "dialog", "dropdown", "form field", "accessibility", "aria", "screen reader", "keyboard navigation", "responsive layout"]
     core_skills: ["accessibility", "frontend-core"]
     technology_skills: []
     reason: "UI interaction changes require accessibility and frontend-core review (AGENTS.md mandatory concerns)."
@@ -69,6 +75,11 @@ skill_triggers:
     core_skills: ["dependency-management"]
     technology_skills: []
     reason: "New or upgraded dependencies require a dependency-management review pass (AGENTS.md mandatory concerns)."
+  database-change:
+    match: ["migration", "schema change", "alter table", "add column", "drop column", "drop table", "rename column", "backfill", "seed data", "ddl"]
+    core_skills: ["data-migration"]
+    technology_skills: []
+    reason: "Schema and data changes are never a fast path (rules.yaml db_changes_require_plan, AGENTS.md G1) and are frequently destructive (G5). data-migration previously reached only tasks already owned by the database role, so a backend-owned migration task got none of that discipline."
   coordination-handoff:
     match: ["parallel task", "parallel work", "parallel agent", "concurrent task", "concurrent worker", "blocked work", "handoff", "hand-off", "task retry"]
     core_skills: ["workflow-orchestration"]
@@ -84,6 +95,16 @@ skill_triggers:
     core_skills: ["architecture-decisions"]
     technology_skills: []
     reason: "Cross-cutting or durable trade-offs require an explicit architecture-decisions record (AGENTS.md mandatory concerns). Kept separate from architecture-pipeline below: that one matches the bare word 'architecture', which is not a substring of 'architectural' -- this trigger covers the word forms AGENTS.md's own row actually uses."
+  release-deployment:
+    match: ["deploy", "rollback", "roll back", "cut a release", "release version", "production release", "release notes", "changelog", "ci pipeline", "version bump"]
+    core_skills: ["release-management", "github-actions-ci", "deployment-infra"]
+    technology_skills: []
+    reason: "Ship/CI/version/deployment/rollback work requires release, CI, and deployment-infra controls (AGENTS.md mandatory concerns). Previously these loaded only when the task already happened to be owned by the release role -- a backend-owned deploy task got none of them."
+  documentation:
+    match: ["documentation", "readme", "api docs", "runbook", "user guide", "operational doc"]
+    core_skills: ["documentation-maintenance"]
+    technology_skills: []
+    reason: "User, API, operational, or decision documentation requires documentation-maintenance (AGENTS.md mandatory concerns). Previously loaded only when the task was already owned by the document role."
   prompt-injection:
     match: ["prompt injection", "jailbreak", "system prompt leak", "tool abuse"]
     core_skills: ["threat-modeling", "security-review"]
@@ -97,12 +118,12 @@ skill_triggers:
   # volume) without forcing in AI-specific skills; ai-cost-token is scoped to
   # phrases that only make sense for LLM token/cost pressure.
   performance-latency:
-    match: ["latency", "slow response", "p95", "p99", "throughput", "query volume", "memory pressure"]
+    match: ["latency", "slow response", "p95", "p99", "throughput", "query volume", "memory"]
     core_skills: ["performance-profiling", "observability"]
     technology_skills: []
     reason: "Latency/throughput/memory/query-volume concerns require measured baselines and observability (AGENTS.md Performance row)."
   ai-cost-token:
-    match: ["token budget", "token limit", "token usage", "prompt tokens", "completion tokens", "context window", "llm cost", "inference cost", "api spend", "token cost", "cost per request"]
+    match: ["token budget", "token limit", "token usage", "token pressure", "prompt tokens", "completion tokens", "context window", "llm cost", "inference cost", "api spend", "token cost", "cost per request"]
     core_skills: ["performance-profiling", "observability"]
     technology_skills: ["ai/llm-observability", "ai/ai-cost-management"]
     reason: "LLM token/cost pressure requires AI cost telemetry in addition to standard performance controls."
@@ -112,7 +133,7 @@ skill_triggers:
     technology_skills: ["ai/model-evaluation"]
     reason: "Evaluation changes require reproducible quality and end-to-end validation evidence."
   external-provider-api:
-    match: ["external provider", "third-party api", "webhook", "callback", "event consumer", "provider sdk"]
+    match: ["external provider", "external api", "third-party api", "webhook", "callback", "event consumer", "provider sdk", "retry"]
     core_skills: ["integration-contracts", "contract-testing", "webhooks-and-retries"]
     technology_skills: ["ai/llm-application"]
     reason: "Provider and callback boundaries require contract safety and retry discipline."

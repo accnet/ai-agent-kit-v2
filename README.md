@@ -37,6 +37,29 @@ The kit is tool-agnostic. `AGENTS.md` is the authoritative instruction file.
 - Technology skills use `skill.meta.yaml`; schema is documented in
   `.ai/skills/SKILL-METADATA.md`.
 
+### Skill depth is tiered on purpose
+
+Skill documents deliberately vary in depth by roughly 20x. This is a design
+choice, not uneven coverage, and it matters because an earlier version of this
+kit mistook file count for knowledge depth — 246 skill files that were largely
+one boilerplate template repeated under different technology names.
+
+| Tier | Size | What it is | Examples |
+| --- | --- | --- | --- |
+| Deep | 24–28 KB | Full reference with runnable code and worked failure cases | `ai/rag`, `ai/openai` |
+| Substantial | 6–8 KB | Concrete patterns plus commented examples | `database/postgresql`, `frontend/react`, `devops/docker` |
+| Guardrail | 1–4 KB | Technology-specific checks and pitfalls, no tutorial | the remaining ~35 |
+
+The guardrail tier is the intended default. These skills exist to stop known
+mistakes in a technology the agent already knows — not to teach it that
+technology. Judge a skill by whether every line is specific to its technology
+and actionable, never by length. `check-skills.sh` enforces non-empty documents
+and rejects placeholder markers, but no threshold can detect
+technology-specific-but-useless prose, so that judgement stays with review.
+
+Invest in promoting a skill to a deeper tier only when a real task keeps
+failing for want of the detail.
+
 ## Gate Rules Configuration
 
 Gate behaviour is controlled by `.ai-config/rules.yaml`. The engine reads it

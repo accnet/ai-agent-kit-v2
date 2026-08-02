@@ -5,6 +5,11 @@
     let arch = {};
     let impact = {};
     let events = [];
+    let discovered = null; // discovered-architecture.json — optional, may not exist yet
+    let discoveryWarnings = [];
+    let sourceFilter = 'all'; // 'all' | 'declared' | 'discovered'
+    let ownerFilterVal = 'all';
+    let contextFilterVal = 'all';
 
     async function loadData() {
       try {
@@ -18,6 +23,45 @@
       } catch(e) {
         console.warn('Could not load data files — using empty state:', e);
       }
+      // discovered-architecture.json is a separate, optional artifact: older
+      // projects (or ones that never ran `ai-kit architecture discover`)
+      // won't have it yet, so this always falls back to architecture.json
+      // alone rather than failing the whole load.
+      try {
+        const res = await fetch('discovered-architecture.json');
+        discovered = res.ok ? await res.json() : null;
+      } catch (e) {
+        discovered = null;
+      }
+      mergeDiscoveredArchitecture();
+    }
+
+    // ── MERGE DECLARED + DISCOVERED ARCHITECTURE ──────────────
+    // Combines architecture.json (declared bounded contexts, always
+    // present) with discovered-architecture.json (feature modules +
+    // dependency edges, optional) into the single `arch` map every render
+    // function below already reads generically by key — no module name is
+    // ever hardcoded here or anywhere else in this file.
+    function mergeDiscoveredArchitecture() {
+      const merged = {};
+      Object.entries(arch).forEach(([name, info]) => {
+        merged[name] = Object.assign({source: 'declared', kind: 'bounded-context', parent: null, confidence: 1}, info);
+      });
+      discoveryWarnings = (discovered && discovered.warnings) || [];
+      if (discovered && discovered.modules) {
+        Object.entries(discovered.modules).forEach(([name, info]) => {
+          if (info.source === 'declared') return; // already present from architecture.json
+          if (!merged[name]) {
+            merged[name] = Object.assign({depends_on: []}, info);
+          }
+        });
+        (discovered.edges || []).forEach(edge => {
+          if (!merged[edge.from]) return;
+          const deps = merged[edge.from].depends_on || (merged[edge.from].depends_on = []);
+          if (!deps.includes(edge.to)) deps.push(edge.to);
+        });
+      }
+      arch = merged;
     }
     await loadData();
 
@@ -53,6 +97,9 @@
     const lblZoom = document.getElementById('lblZoom');
     const modTree = document.getElementById('modTree');
     const modCount = document.getElementById('modCount');
+    const modFilterBar = document.getElementById('modFilterBar');
+    const ownerFilterSel = document.getElementById('ownerFilterSel');
+    const contextFilterSel = document.getElementById('contextFilterSel');
     const timelineSlider = document.getElementById('timelineSlider');
     const tcLabel = document.getElementById('tcLabel');
     const btnPlay = document.getElementById('btnPlay');
@@ -85,7 +132,14 @@
     }
 
     const allTasks = () => Object.values(board).flat();
-    const allMods = () => Object.keys(arch);
+    const allMods = () => Object.keys(arch).filter(passesModuleFilters);
+    function passesModuleFilters(k) {
+      const m = arch[k] || {};
+      if (sourceFilter !== 'all' && (m.source || 'declared') !== sourceFilter) return false;
+      if (ownerFilterVal !== 'all' && (m.owner || 'unknown') !== ownerFilterVal) return false;
+      if (contextFilterVal !== 'all' && k !== contextFilterVal && (m.parent || null) !== contextFilterVal) return false;
+      return true;
+    }
     function replayBounds() {
       const timestamps = events.map(e => Date.parse(e.ts)).filter(Number.isFinite);
       return timestamps.length ? { min: Math.min(...timestamps), max: Math.max(...timestamps) } : null;
@@ -98,9 +152,21 @@
     function moduleForTask(task) {
       if (!task) return null;
       if (task.context && arch[task.context]) return task.context;
-      return (task.files || []).length
-        ? Object.entries(arch).find(([, module]) => (task.files || []).includes(module.path))?.[0] || null
-        : null;
+      const files = task.files || [];
+      if (!files.length) return null;
+      // Priority 2: most specific module whose path is a prefix of (or
+      // fnmatch-style glob-matches, `*` spans `/`) one of the task's files.
+      // Never a bare substring/name comparison, which could match an
+      // unrelated module that happens to share a word.
+      let best = null;
+      Object.entries(arch).forEach(([name, module]) => {
+        const path = module.path;
+        if (!path) return;
+        const globRe = new RegExp('^' + path.split('*').map(s => s.replace(/[.+?^${}()|[\]\\]/g, '\\$&')).join('.*') + '$');
+        const matches = files.some(f => f === path || f.startsWith(path + '/') || globRe.test(f));
+        if (matches && (!best || path.length > arch[best].path.length)) best = name;
+      });
+      return best;
     }
     function moduleTasks(name) { return allTasks().filter(task => moduleForTask(task) === name); }
     function taskAddedAtReplay(task) {
@@ -342,6 +408,31 @@
       return currentLayout === 'ltr' ? getLayeredPositions() : getRadialPositions();
     }
 
+    // ── MODULE FILTERS (source / owner / context) ─────────────
+    modFilterBar.addEventListener('click', e => {
+      const btn = e.target.closest('[data-src-filter]');
+      if (!btn) return;
+      sourceFilter = btn.dataset.srcFilter;
+      modFilterBar.querySelectorAll('[data-src-filter]').forEach(b => b.classList.toggle('on', b === btn));
+      renderAll();
+    });
+    ownerFilterSel.addEventListener('change', () => { ownerFilterVal = ownerFilterSel.value; renderAll(); });
+    contextFilterSel.addEventListener('change', () => { contextFilterVal = contextFilterSel.value; renderAll(); });
+
+    function refreshFilterOptions() {
+      const owners = Array.from(new Set(Object.values(arch).map(m => m.owner).filter(Boolean))).sort();
+      const contexts = Array.from(new Set(
+        Object.entries(arch).filter(([,m]) => (m.kind||'bounded-context') === 'bounded-context').map(([name]) => name)
+      )).sort();
+      const rebuild = (sel, values, current) => {
+        sel.innerHTML = `<option value="all">All ${sel === ownerFilterSel ? 'owners' : 'contexts'}</option>` +
+          values.map(v => `<option value="${v}">${v}</option>`).join('');
+        sel.value = values.includes(current) ? current : 'all';
+      };
+      rebuild(ownerFilterSel, owners, ownerFilterVal);
+      rebuild(contextFilterSel, contexts, contextFilterVal);
+    }
+
     // ── RENDER MODULE TREE ────────────────────────────────────
     function renderModTree() {
       const mods = allMods();
@@ -382,11 +473,18 @@
           const name = document.createElement('div');
           name.className = 'mod-name';
           name.textContent = k.replace(/^(backend|extension)-/,'');
+          const m = arch[k] || {};
+          if (m.parent) name.textContent = '↳ ' + name.textContent;
+          const srcTag = document.createElement('span');
+          srcTag.className = 'mod-src-tag ' + (m.source === 'discovered' ? 'mod-src-discovered' : 'mod-src-declared');
+          srcTag.textContent = m.source === 'discovered' ? 'discovered' : 'declared';
+          name.appendChild(srcTag);
           const path = document.createElement('div');
           path.className = 'mod-path';
           path.textContent = arch[k]?.path || '';
           const inner = document.createElement('div');
           inner.style.flex = '1';
+          if (m.parent) inner.style.marginLeft = '10px';
           inner.appendChild(name);
           inner.appendChild(path);
           item.appendChild(dot);
@@ -625,10 +723,11 @@
                   : '<rect x="2" y="2" width="20" height="8" rx="2"/><rect x="2" y="14" width="20" height="8" rx="2"/>'}
               </svg>
             </div>
-            <span class="chip-status ${ownerChipCls}">${m.owner}</span>
+            <span class="chip-status ${ownerChipCls}">${m.owner||'unowned'}</span>
+            <span class="mod-src-tag ${m.source==='discovered'?'mod-src-discovered':'mod-src-declared'}" style="margin-left:auto;">${m.source||'declared'}${m.source==='discovered' && m.confidence!=null ? ' ' + Math.round(m.confidence*100) + '%' : ''}</span>
           </div>
           <div class="node-name">${shortName}</div>
-          <div class="node-path">${m.path}</div>
+          <div class="node-path">${m.parent ? '↳ ' + m.parent + ' / ' : ''}${m.path}</div>
           ${layers.evolution ? `<div class="prog-row"><span>acceptance</span><span>${stats.passed}/${stats.total}</span></div>
           <div class="prog-bar"><div class="prog-fill" style="width:${Math.round(stats.ratio * 100)}%;"></div></div>` : ''}
           ${layers.rev ? `<div class="prog-row"><span>rev</span><span>${m.revision||1}</span></div>
@@ -709,13 +808,19 @@
       const impData = impact[k] || {};
 
       if (currentTab === 'info') {
+        const moduleWarnings = discoveryWarnings.filter(w => (w.detail||'').includes(`'${k}'`));
         inspBody.innerHTML = `
           <div class="ib"><div class="ib-k">Module</div><div class="ib-v">${k}</div></div>
           <div class="ib"><div class="ib-k">Owner</div><div class="ib-v" style="color:${ownerColor(m.owner)}">@${m.owner||'—'}</div></div>
+          <div class="ib"><div class="ib-k">Source</div><div class="ib-v"><span class="mod-src-tag ${m.source==='discovered'?'mod-src-discovered':'mod-src-declared'}">${m.source||'declared'}</span></div></div>
+          <div class="ib"><div class="ib-k">Kind</div><div class="ib-v">${m.kind||'bounded-context'}</div></div>
+          ${m.source==='discovered' ? `<div class="ib"><div class="ib-k">Confidence</div><div class="ib-v">${Math.round((m.confidence||0)*100)}%${m.framework?` (${m.framework})`:''}</div></div>` : ''}
+          ${m.parent ? `<div class="ib"><div class="ib-k">Parent context</div><div class="ib-v">${m.parent}</div></div>` : ''}
           <div class="ib"><div class="ib-k">Revision</div><div class="ib-v">r${m.revision||1}</div></div>
           <div class="ib"><div class="ib-k">Path</div><div class="ib-v" style="font-family:var(--mono);font-size:10px;">${m.path||'—'}</div></div>
           <div class="ib"><div class="ib-k">Depends On</div><div class="ib-v">${(m.depends_on||[]).join(', ')||'None'}</div></div>
           <div class="ib"><div class="ib-k">All Dependents</div><div class="ib-v" style="color:var(--amber)">${(impData.all_dependents||[]).join(', ')||'None'}</div></div>
+          ${moduleWarnings.length ? `<div class="ib ib-full"><div class="ib-k" style="color:var(--amber);">Warnings</div>${moduleWarnings.map(w=>`<div style="font-size:10px;color:var(--amber);margin-top:4px;">⚠ ${w.kind}: ${w.detail}</div>`).join('')}</div>` : ''}
         `;
       } else if (currentTab === 'deps') {
         const deps = m.depends_on||[];
@@ -748,10 +853,10 @@
           </div>
         `;
       } else if (currentTab === 'tasks') {
-        const relTasks = allTasks().filter(t => (t.files||[]).some(f => f.includes(m.path?.split('/').pop())));
+        const relTasks = moduleTasks(k);
         inspBody.innerHTML = `
           <div class="ib ib-full">
-            <div class="ib-k">Related Tasks (by file)</div>
+            <div class="ib-k">Related Tasks (by context, then file path)</div>
             ${relTasks.length ? relTasks.map(t=>`
               <div style="margin-top:8px; background:rgba(255,255,255,.03); border:1px solid var(--border); border-radius:7px; padding:8px;">
                 <div style="font-family:var(--mono); color:var(--cyan); font-size:10px;">${t.id}</div>
@@ -825,6 +930,7 @@
 
     // ── FULL RENDER ───────────────────────────────────────────
     function renderAll() {
+      refreshFilterOptions();
       renderModTree();
       renderStats();
       renderAgents();

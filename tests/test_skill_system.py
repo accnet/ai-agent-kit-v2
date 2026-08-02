@@ -225,60 +225,95 @@ class SkillsForStackRoutingTests(unittest.TestCase):
 
 
 class SkillsForRoleRoutingTests(unittest.TestCase):
-    """skills-for.sh role-based domain routing from the real registry."""
+    """skills-for.sh role-based domain routing from the real registry.
+
+    These assert step (c) of skills-for.sh's documented stack-resolution
+    order -- "role's domain list from owners: in registry.yaml" -- which by
+    definition only applies when no stack narrows the result first. They
+    therefore run against a root that shares the REAL registry.yaml and the
+    REAL .ai/skills tree (so the owner mappings under test are the live
+    ones) but pins project.stack to empty.
+
+    They used to run against the repo root directly and passed only because
+    this repo happened to ship `project.stack: []`. Once the kit started
+    dogfooding its own config (`stack: [python]`), step (b) took priority
+    and six of these broke -- correct engine behavior, an accidental test
+    dependency on ambient project config.
+    """
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls._tmp = tempfile.TemporaryDirectory()
+        root = Path(cls._tmp.name)
+        (root / ".ai").mkdir(parents=True, exist_ok=True)
+        (root / ".ai-config").mkdir(parents=True, exist_ok=True)
+        # Share the real skill tree and registry; only project.stack differs.
+        (root / ".ai" / "skills").symlink_to(REPO_ROOT / ".ai" / "skills")
+        (root / ".ai-config" / "registry.yaml").write_bytes(REGISTRY.read_bytes())
+        (root / ".ai-config" / "kit.yaml").write_text(
+            "project:\n  stack: []\n  source_dirs: []\n", encoding="utf-8"
+        )
+        cls.root = root
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls._tmp.cleanup()
+
+    def _for(self, role: str) -> str:
+        return run_skills_for([role], root=self.root)[1]
 
     def test_backend_includes_ai_skills_by_default(self) -> None:
         """backend role includes ai domain by default per registry.yaml."""
-        _, out = run_skills_for(["backend"])
+        out = self._for("backend")
         self.assertIn(".ai/skills/ai/openai/overview.md", out)
         self.assertIn(".ai/skills/ai/rag/overview.md", out)
 
     def test_security_includes_ai_skills(self) -> None:
         """security role includes ai domain per registry.yaml owners."""
-        _, out = run_skills_for(["security"])
-        self.assertIn(".ai/skills/ai/openai/overview.md", out)
+        self.assertIn(".ai/skills/ai/openai/overview.md", self._for("security"))
 
     def test_architect_includes_ai_skills(self) -> None:
         """architect role includes ai domain per registry.yaml owners."""
-        _, out = run_skills_for(["architect"])
-        self.assertIn(".ai/skills/ai/", out)
+        self.assertIn(".ai/skills/ai/", self._for("architect"))
 
     def test_qa_includes_ai_skills(self) -> None:
         """qa role includes ai domain per registry.yaml owners."""
-        _, out = run_skills_for(["qa"])
-        self.assertIn(".ai/skills/ai/", out)
+        self.assertIn(".ai/skills/ai/", self._for("qa"))
 
     def test_integration_includes_ai_skills(self) -> None:
         """integration role includes ai domain."""
-        _, out = run_skills_for(["integration"])
-        self.assertIn(".ai/skills/ai/", out)
+        self.assertIn(".ai/skills/ai/", self._for("integration"))
 
     def test_performance_includes_ai_skills(self) -> None:
         """performance role includes ai domain."""
-        _, out = run_skills_for(["performance"])
-        self.assertIn(".ai/skills/ai/", out)
+        self.assertIn(".ai/skills/ai/", self._for("performance"))
 
     def test_frontend_does_not_include_ai_skills(self) -> None:
         """frontend role does NOT include ai domain (unrelated)."""
-        _, out = run_skills_for(["frontend"])
-        non_core_ai = [l for l in out.splitlines()
+        non_core_ai = [l for l in self._for("frontend").splitlines()
                        if "/ai/" in l and "/core/" not in l]
         self.assertEqual(non_core_ai, [],
                          f"frontend should not include ai skills: {non_core_ai}")
 
     def test_devops_does_not_include_ai_skills(self) -> None:
         """devops role does NOT include ai domain (unrelated)."""
-        _, out = run_skills_for(["devops"])
-        non_core_ai = [l for l in out.splitlines()
+        non_core_ai = [l for l in self._for("devops").splitlines()
                        if "/ai/" in l and "/core/" not in l]
         self.assertEqual(non_core_ai, [],
                          f"devops should not include ai skills: {non_core_ai}")
 
     def test_backend_core_skills_still_present(self) -> None:
         """backend core skills (api-contract, observability) remain unaffected."""
-        _, out = run_skills_for(["backend"])
+        out = self._for("backend")
         self.assertIn(".ai/skills/core/api-contract/SKILL.md", out)
         self.assertIn(".ai/skills/core/observability/SKILL.md", out)
+
+    def test_configured_stack_takes_priority_over_role_owners(self) -> None:
+        """The flip side, asserted against the repo's own dogfooded config:
+        with project.stack set, step (b) narrows before role owners apply."""
+        out = run_skills_for(["security"])[1]
+        self.assertNotIn(".ai/skills/ai/openai/overview.md", out)
+        self.assertIn(".ai/skills/core/security-review/SKILL.md", out)
 
 
 class CheckSkillsPlaceholderTests(unittest.TestCase):
