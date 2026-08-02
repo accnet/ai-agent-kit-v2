@@ -40,3 +40,4 @@ Mở `http://localhost:8080/index.html`. `workflow.json` được thử đọc t
 - `board.json`: workflow hiện tại qua `ai-kit board --format json`, kèm tags/files/acceptance_count.
 - `events.json`: 200 runtime events gần nhất từ `.ai-work/logs/events.jsonl`.
 - `dag.json`: task dependency graph (edges, layer/wave, stage, history, ready, critical_path) computed by `_generate_dag_payload()` from the current workflow state — see the "DAG tab" section above.
+- `artifacts.json`: schema-version manifest for the five payloads above (`{schema_version, generated_at, artifacts: {filename: version}}`), written alongside them on every `visualizer generate`. Not fetched by any page today; it exists so an external consumer of these files (or a future page) can check compatibility before parsing, the same way task handoff JSON already carries its own `schema_version`. Bump an artifact's entry here when its shape changes in a way a consumer must know about.

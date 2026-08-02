@@ -22,6 +22,23 @@ STATE = WORK / "state" / "workflow.json"
 CURRENT = WORK / "state" / "current.json"
 EVENT_LOG = WORK / "logs" / "events.jsonl"
 VISUALIZER_DIR = ROOT / ".visualizer"
+# Per-artifact schema version for the generated .visualizer/*.json payloads.
+# Bump an individual entry when that artifact's shape changes in a way a
+# consumer must know about (added/removed/retyped top-level field); the
+# board/architecture/impact/dag payloads themselves are keyed by task id,
+# context name, or fixed field name and are read that way by app.js/dag.html
+# (see tests/test_visualizer_contract.py), so schema_version is never mixed
+# into those payloads -- it would be misread as a task, module, or column.
+# .visualizer/artifacts.json is the one place a consumer checks compatibility
+# before parsing the rest, mirroring the handoff JSON's own "schema_version".
+VISUALIZER_ARTIFACT_VERSIONS = {
+    "board.json": 1,
+    "architecture.json": 1,
+    "impact.json": 1,
+    "events.json": 1,
+    "dag.json": 1,
+}
+VISUALIZER_MANIFEST_SCHEMA_VERSION = 1
 CONFIG_FILES = {
     "runners.yaml",
     "automation.yaml",
@@ -537,9 +554,9 @@ ROLE_DOMAINS = {
     "database": ["database"], "devops": ["devops"], "release": ["devops"], "qa": ["testing"],
 }
 CORE_BY_ROLE = {
-    "planner": ["requirements-intake", "skill-router"],
+    "planner": ["requirements-intake", "requirement-decomposer", "skill-router"],
     "researcher": ["requirements-intake", "skill-router"],
-    "architect": ["refactoring", "api-contract"],
+    "architect": ["refactoring", "api-contract", "system-designer"],
     "backend": ["api-contract", "observability"],
     "frontend": ["frontend-core", "test-and-validation"],
     "database": ["data-migration", "api-contract"],
@@ -1002,6 +1019,31 @@ def event(state: dict, path: Path, action: str, task: dict | None, actor: str, o
     return item
 
 
+def _visualizer_manifest() -> dict:
+    """The one file a consumer checks for compatibility before parsing any
+    other .visualizer/*.json payload -- see VISUALIZER_ARTIFACT_VERSIONS."""
+    manifest = {
+        "schema_version": VISUALIZER_MANIFEST_SCHEMA_VERSION,
+        "generated_at": now(),
+        "artifacts": dict(VISUALIZER_ARTIFACT_VERSIONS),
+    }
+    _validate_visualizer_manifest(manifest)
+    return manifest
+
+
+def _validate_visualizer_manifest(manifest: dict) -> None:
+    if not isinstance(manifest.get("schema_version"), int):
+        raise EngineError("visualizer manifest: schema_version must be an int")
+    artifacts = manifest.get("artifacts")
+    if not isinstance(artifacts, dict) or not artifacts:
+        raise EngineError("visualizer manifest: artifacts must be a non-empty object")
+    for filename, version in artifacts.items():
+        if not isinstance(filename, str) or not filename.endswith(".json"):
+            raise EngineError(f"visualizer manifest: invalid artifact filename {filename!r}")
+        if not isinstance(version, int):
+            raise EngineError(f"visualizer manifest: artifact version for {filename!r} must be an int")
+
+
 def _generate_visualizer_data(state_arg: str | Path | None = None) -> dict:
     if not VISUALIZER_DIR.exists():
         return {}
@@ -1013,6 +1055,7 @@ def _generate_visualizer_data(state_arg: str | Path | None = None) -> dict:
             "impact.json": {},
             "events.json": [],
             "dag.json": {"tasks": [], "edges": [], "waves": 0, "ready": [], "critical_path": []},
+            "artifacts.json": _visualizer_manifest(),
         }
         for filename, payload in payloads.items():
             (VISUALIZER_DIR / filename).write_text(
@@ -1050,6 +1093,7 @@ def _generate_visualizer_data(state_arg: str | Path | None = None) -> dict:
         "impact.json": impact,
         "events.json": events,
         "dag.json": _generate_dag_payload(state),
+        "artifacts.json": _visualizer_manifest(),
     }
     for filename, payload in payloads.items():
         (VISUALIZER_DIR / filename).write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
@@ -1995,6 +2039,63 @@ def cmd_onboard(args: argparse.Namespace) -> dict:
     return proposal
 
 
+ANALYZE_SCHEMA_VERSION = 1
+
+
+def cmd_analyze(args: argparse.Namespace) -> dict:
+    """Project Analyzer + Knowledge Graph Builder: a read-only static-analysis
+    snapshot combining stack/runtime detection (same detection `onboard`
+    uses) with the module and ownership graph declared in
+    `.ai-config/contexts.yaml`, plus a short list of static-analysis risk
+    signals.
+
+    This is deliberately scoped to what the repo's own config actually
+    declares -- a bounded-context/module graph and its owners -- not a
+    language-aware entity/API extractor. There is no parser here for
+    arbitrary source languages, and this function must not grow one; a task
+    that needs that is a new, separately-scoped capability with its own
+    tests, not a quiet expansion of this one.
+    """
+    onboard_proposal = cmd_onboard(argparse.Namespace(apply=False))
+    contexts = _load_contexts()
+    modules = {
+        name: {"path": info.get("path"), "owner": info.get("owner"), "depends_on": list(info.get("depends_on") or [])}
+        for name, info in contexts.items()
+    }
+    ownership: dict[str, list[str]] = {}
+    for name, info in contexts.items():
+        ownership.setdefault(info.get("owner") or "unowned", []).append(name)
+
+    risks = []
+    for name, info in contexts.items():
+        if not info.get("owner"):
+            risks.append({"kind": "unowned_context", "context": name, "detail": "no owner declared in contexts.yaml"})
+        for dependency in info.get("depends_on") or []:
+            if dependency not in contexts:
+                risks.append({
+                    "kind": "dangling_dependency", "context": name,
+                    "detail": f"depends_on unknown context '{dependency}' -- contexts.yaml may have been hand-edited",
+                })
+    if not onboard_proposal.get("verification"):
+        risks.append({"kind": "no_verification_command", "detail": "no test/lint/build command detected; verify will report inconclusive"})
+
+    summary = {
+        "schema_version": ANALYZE_SCHEMA_VERSION,
+        "generated_at": now(),
+        "stack": onboard_proposal["stack"],
+        "container_runtime": onboard_proposal["container_runtime"],
+        "modules": modules,
+        "ownership": ownership,
+        "risks": risks,
+    }
+    output_dir = workspace(state_path(args.state)) / "analysis"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    (output_dir / "project-summary.json").write_text(
+        json.dumps(summary, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+    )
+    return summary
+
+
 def cmd_approve(args: argparse.Namespace) -> dict:
     state = load(state_path(args.state)); validate(state)
     task = task_map(state).get(args.id)
@@ -2391,6 +2492,7 @@ def parser() -> argparse.ArgumentParser:
     epic_list = epic_sub.add_parser("list"); epic_list.set_defaults(fn=cmd_epic_list)
     drift = sub.add_parser("drift"); drift.add_argument("id"); drift.set_defaults(fn=cmd_drift)
     onboard = sub.add_parser("onboard"); onboard.add_argument("--apply", action="store_true"); onboard.set_defaults(fn=cmd_onboard)
+    analyze = sub.add_parser("analyze"); analyze.set_defaults(fn=cmd_analyze)
     show = sub.add_parser("show"); show.set_defaults(fn=cmd_show)
     valid = sub.add_parser("validate"); valid.set_defaults(fn=lambda args: (validate(load(state_path(args.state))) or {"valid": True}))
     return root

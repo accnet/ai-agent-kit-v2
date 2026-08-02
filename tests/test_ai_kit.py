@@ -457,6 +457,65 @@ class DagPayloadTests(EngineTestCase):
         self.assertEqual(dag["waves"], 3)
 
 
+class VisualizerManifestTests(EngineTestCase):
+    """.visualizer/artifacts.json is the schema-version manifest a consumer
+    checks before parsing board/architecture/impact/events/dag.json -- see
+    AGENTS.md's 'Artifact Schema Versioning'. Unlike EngineTestCase's default
+    VISUALIZER_DIR (deliberately nonexistent so most tests never touch disk),
+    these tests point it at a real temp directory to exercise the actual
+    write path."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        ai_kit.VISUALIZER_DIR = self.root / ".visualizer"
+        ai_kit.VISUALIZER_DIR.mkdir(parents=True, exist_ok=True)
+
+    def _manifest(self) -> dict:
+        return json.loads((ai_kit.VISUALIZER_DIR / "artifacts.json").read_text(encoding="utf-8"))
+
+    def test_manifest_written_when_no_workflow_state_exists_yet(self) -> None:
+        ai_kit._generate_visualizer_data(str(self.state_file))
+        manifest = self._manifest()
+        self.assertEqual(manifest["schema_version"], ai_kit.VISUALIZER_MANIFEST_SCHEMA_VERSION)
+        self.assertEqual(manifest["artifacts"], ai_kit.VISUALIZER_ARTIFACT_VERSIONS)
+
+    def test_manifest_written_alongside_real_payloads(self) -> None:
+        self.init_workflow()
+        self.add_task("T0")
+        payloads = ai_kit._generate_visualizer_data(str(self.state_file))
+        self.assertIn("artifacts.json", payloads)
+        manifest = self._manifest()
+        self.assertEqual(manifest["artifacts"], ai_kit.VISUALIZER_ARTIFACT_VERSIONS)
+
+    def test_manifest_lists_exactly_the_other_generated_payloads(self) -> None:
+        """Every artifact the manifest names must be a file the generator
+        actually writes, and vice versa -- otherwise the manifest could drift
+        from reality on either side."""
+        self.init_workflow()
+        payloads = ai_kit._generate_visualizer_data(str(self.state_file))
+        written = set(payloads) - {"artifacts.json"}
+        self.assertEqual(written, set(ai_kit.VISUALIZER_ARTIFACT_VERSIONS))
+
+    def test_validator_rejects_missing_schema_version(self) -> None:
+        with self.assertRaises(ai_kit.EngineError):
+            ai_kit._validate_visualizer_manifest({"artifacts": {"dag.json": 1}})
+
+    def test_validator_rejects_non_int_schema_version(self) -> None:
+        with self.assertRaises(ai_kit.EngineError):
+            ai_kit._validate_visualizer_manifest({"schema_version": "1", "artifacts": {"dag.json": 1}})
+
+    def test_validator_rejects_empty_artifacts(self) -> None:
+        with self.assertRaises(ai_kit.EngineError):
+            ai_kit._validate_visualizer_manifest({"schema_version": 1, "artifacts": {}})
+
+    def test_validator_rejects_non_int_artifact_version(self) -> None:
+        with self.assertRaises(ai_kit.EngineError):
+            ai_kit._validate_visualizer_manifest({"schema_version": 1, "artifacts": {"dag.json": "1"}})
+
+    def test_validator_accepts_the_real_manifest(self) -> None:
+        ai_kit._validate_visualizer_manifest(ai_kit._visualizer_manifest())
+
+
 class RoutingAndSkillMetadataTests(EngineTestCase):
     def _write_skill(self, relative: str) -> None:
         skill_dir = self.root / relative
@@ -1085,6 +1144,88 @@ class ContainerRuntimeDetectionTests(EngineTestCase):
         self.assertTrue(proposal["container_runtime"]["database_in_compose"])
 
 
+class ProjectAnalyzerTests(EngineTestCase):
+    """`ai-kit analyze` (Project Analyzer + Knowledge Graph Builder): a
+    read-only snapshot combining onboard's stack/runtime detection with the
+    module/ownership graph declared in contexts.yaml, plus static-analysis
+    risk signals. Deliberately scoped to what contexts.yaml declares -- not a
+    language-aware code analyzer."""
+
+    def _add_context(self, name: str, path: str = "src/*", owner: str = "backend",
+                      depends_on: list[str] | None = None, force: bool = False) -> dict:
+        return ai_kit.cmd_context_add(argparse.Namespace(
+            state=str(self.state_file), name=name, path=path, owner=owner,
+            depends_on=depends_on, force=force,
+        ))
+
+    def _analyze(self) -> dict:
+        return ai_kit.cmd_analyze(ns(state=str(self.state_file)))
+
+    def test_empty_registry_yields_empty_graph_with_no_risks(self) -> None:
+        summary = self._analyze()
+        self.assertEqual(summary["modules"], {})
+        self.assertEqual(summary["ownership"], {})
+        self.assertEqual(summary["schema_version"], ai_kit.ANALYZE_SCHEMA_VERSION)
+
+    def test_modules_and_ownership_reflect_registered_contexts(self) -> None:
+        self._add_context("ordering", path="src/ordering/*", owner="backend")
+        self._add_context("ui", path="src/ui/*", owner="frontend")
+        summary = self._analyze()
+        self.assertEqual(summary["modules"]["ordering"]["owner"], "backend")
+        self.assertEqual(summary["modules"]["ordering"]["path"], "src/ordering/*")
+        self.assertEqual(summary["ownership"]["backend"], ["ordering"])
+        self.assertEqual(summary["ownership"]["frontend"], ["ui"])
+
+    def test_dependency_appears_in_module_graph(self) -> None:
+        self._add_context("core", owner="backend")
+        self._add_context("api", owner="backend", depends_on=["core"])
+        summary = self._analyze()
+        self.assertEqual(summary["modules"]["api"]["depends_on"], ["core"])
+        self.assertEqual(summary["risks"], [
+            {"kind": "no_verification_command",
+             "detail": "no test/lint/build command detected; verify will report inconclusive"},
+        ])
+
+    def test_unowned_context_is_flagged_as_a_risk(self) -> None:
+        path = self.root / ".ai-config" / "contexts.yaml"
+        path.write_text("contexts:\n  legacy:\n    path: legacy/*\n", encoding="utf-8")
+        summary = self._analyze()
+        risk_kinds = {r["kind"] for r in summary["risks"]}
+        self.assertIn("unowned_context", risk_kinds)
+
+    def test_dangling_dependency_is_flagged_as_a_risk(self) -> None:
+        """cmd_context_add's own cycle/existence checks stop this via the
+        CLI, but contexts.yaml is a hand-editable YAML file, so a
+        static-analysis pass must catch a dependency left dangling by a
+        manual edit -- not assume the registry was only ever built through
+        the CLI."""
+        path = self.root / ".ai-config" / "contexts.yaml"
+        path.write_text(
+            "contexts:\n  api:\n    path: src/api/*\n    owner: backend\n"
+            "    depends_on: [ghost]\n",
+            encoding="utf-8",
+        )
+        summary = self._analyze()
+        dangling = [r for r in summary["risks"] if r["kind"] == "dangling_dependency"]
+        self.assertEqual(len(dangling), 1)
+        self.assertEqual(dangling[0]["context"], "api")
+
+    def test_missing_verification_command_is_flagged_as_a_risk(self) -> None:
+        summary = self._analyze()
+        self.assertTrue(any(r["kind"] == "no_verification_command" for r in summary["risks"]))
+
+    def test_summary_is_persisted_under_the_workspace(self) -> None:
+        self._analyze()
+        written = json.loads((self.root / "work" / "analysis" / "project-summary.json").read_text(encoding="utf-8"))
+        self.assertEqual(written["schema_version"], ai_kit.ANALYZE_SCHEMA_VERSION)
+
+    def test_stack_and_container_runtime_come_from_onboard_detection(self) -> None:
+        (self.root / "package.json").write_text('{"name":"x"}', encoding="utf-8")
+        summary = self._analyze()
+        self.assertIn("node", summary["stack"])
+        self.assertIn("dockerfile", summary["container_runtime"])
+
+
 class StackSkillsRoutingTests(EngineTestCase):
     """registry.yaml's `stack_skills:` maps a skill to the stack tags that
     should select it. Nothing read it, so routing matched a technology skill
@@ -1372,6 +1513,22 @@ class RegistryEndToEndRoutingTests(EngineTestCase):
         skills = self._route("T1")["skills"]
         self.assertTrue(any("performance-profiling" in s for s in skills), skills)
         self.assertFalse(any("/ai/" in s for s in skills), f"unexpected AI skills: {skills}")
+
+    def test_planner_owned_task_routes_to_requirement_decomposer(self) -> None:
+        """Task decomposition is a base planner responsibility, loaded
+        unconditionally like requirements-intake -- not something a keyword
+        trigger should gate."""
+        self.init_workflow()
+        self.add_task("T1", title="Break the checkout redesign brief into tasks", owner="planner")
+        skills = self._route("T1")["skills"]
+        self.assertTrue(any("requirement-decomposer" in s for s in skills), skills)
+        self.assertTrue(any("requirements-intake" in s for s in skills), skills)
+
+    def test_architect_owned_task_routes_to_system_designer(self) -> None:
+        self.init_workflow()
+        self.add_task("T1", title="Define module boundaries for the new billing service", owner="architect")
+        skills = self._route("T1")["skills"]
+        self.assertTrue(any("system-designer" in s for s in skills), skills)
 
     def test_llm_cost_task_still_pulls_ai_skills(self) -> None:
         self.init_workflow()
