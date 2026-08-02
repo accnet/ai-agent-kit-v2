@@ -190,6 +190,38 @@ def _load_automation_roles() -> dict:
     return roles
 
 
+def _load_post_completion_config() -> dict:
+    """Load the opt-in post-completion automation switch.
+
+    Format (.ai-config/automation.yaml):
+      post_completion:
+        enabled: true
+    A missing file, missing section, or malformed value all default to
+    'enabled: false' so dispatch/transition/pipeline behavior is unchanged
+    unless an operator explicitly opts in.
+    """
+    path = _config_path("automation.yaml")
+    if not path.exists():
+        return {"enabled": False}
+    enabled = False
+    in_section = False
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if line == "post_completion:":
+            in_section = True
+            continue
+        if in_section:
+            if not line.startswith((" ", "\t")):
+                break
+            match = re.match(r"^\s+enabled:\s*(\S+)", line)
+            if match:
+                enabled = match.group(1).strip().strip('"\'').lower() in {"true", "yes", "1"}
+    return {"enabled": enabled}
+
+
+def _post_completion_enabled() -> bool:
+    return bool(_load_post_completion_config().get("enabled"))
+
+
 def _load_runner_aliases() -> dict[str, str]:
     """Load legacy runner-name aliases from a flat YAML section."""
     path = _config_path("runners.yaml")
@@ -1118,6 +1150,21 @@ def cmd_transition(args: argparse.Namespace) -> dict:
     expected = requested_revision if requested_revision is not None else state["revision"]
     save(state, path, expected)
     _auto_generate_visualizer_data(path)
+    if args.action == "complete" and _post_completion_enabled():
+        # Opt-in only (.ai-config/automation.yaml: post_completion.enabled):
+        # chain verify -> independent QA -> independent review -> close so a
+        # caller never has to remember to run `ai-kit pipeline` by hand. Best
+        # effort: failures are recorded as events, not raised, because the
+        # `complete` transition the caller asked for already succeeded above.
+        try:
+            _run_post_completion(task["id"], args.state, agent_id=getattr(args, "agent_id", None))
+        except EngineError as exc:
+            state = load(path)
+            failed_task = task_map(state).get(task["id"])
+            event(state, path, "post-completion-failed", failed_task, "system", None, None, f"unexpected error: {exc}")
+            save(state, path, state["revision"])
+        state = load(path)
+        task = task_map(state).get(task["id"])
     return task
 
 
@@ -1896,6 +1943,207 @@ def cmd_approve(args: argparse.Namespace) -> dict:
     return cmd_transition(args)
 
 
+def _post_completion_lock_path(task_id: str, state_arg: str | None) -> Path:
+    return workspace(state_path(state_arg)) / "locks" / f"post_completion_{task_id}.lock"
+
+
+def _acquire_task_lock(lock_path: Path) -> bool:
+    """Best-effort exclusive file lock so two concurrent post-completion
+    triggers for the same task never run their pipelines at the same time.
+    Returns False (without blocking) if the lock is already held.
+    """
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    except FileExistsError:
+        return False
+    with os.fdopen(fd, "w") as handle:
+        handle.write(str(os.getpid()))
+    return True
+
+
+def _release_task_lock(lock_path: Path) -> None:
+    try:
+        lock_path.unlink()
+    except FileNotFoundError:
+        pass
+
+
+def _dispatch_approval(task_id: str, role: str, state_arg: str | None, agent_id: str | None = None) -> dict:
+    """Dispatch an independent QA or review pass to the runner configured
+    for `role` in .ai-config/automation.yaml -- mirrors cmd_dispatch's
+    executor flow instead of fabricating a verdict in-process. The engine
+    never calls cmd_approve() on the runner's behalf: the dispatched runner
+    is required to render its own verdict and call
+    `ai-kit approve ... --role {role}` (pass/approve) or
+    `ai-kit transition ... reject` (fail/reject) itself before this returns
+    successfully; if the task's status hasn't moved when the runner process
+    exits, that's treated as a failure to act, not an implicit pass.
+    """
+    import subprocess as _sp
+    if role not in {"qa", "review"}:
+        raise EngineError(f"unsupported approval role: {role}")
+    expected_status = "implementation-complete" if role == "qa" else "qa-passed"
+    pass_status = "qa-passed" if role == "qa" else "review-approved"
+    role_key = "qa" if role == "qa" else "reviewer"
+
+    path = state_path(state_arg)
+    state = load(path); validate(state)
+    task = task_map(state).get(task_id)
+    if not task:
+        raise EngineError(f"unknown task: {task_id}")
+    if task["status"] != expected_status:
+        raise EngineError(f"cannot dispatch {role} approval for {task_id} from status {task['status']} (expected {expected_status})")
+
+    roles = _load_automation_roles()
+    exec_runner, _exec_entry, exec_model = _resolve_runner(None, None)
+    runner_name, runner, model = _resolve_runner(roles[role_key]["runner"], roles[role_key].get("model"))
+    if (runner_name, model) == (exec_runner, exec_model):
+        raise EngineError(
+            f".ai-config/automation.yaml: role '{role_key}' resolves to the same identity as 'executor' "
+            f"({runner_name}/{model}); {role} must run under a different runner or model"
+        )
+    agent_id = agent_id or uuid.uuid4().hex[:8]
+
+    state_flag = f" --state {state_arg}" if state_arg else ""
+    verdict_flag = "--status" if role == "qa" else "--verdict"
+    pass_value = "pass" if role == "qa" else "approve"
+    fail_value = "fail" if role == "qa" else "reject"
+    approve_cmd = (
+        f"bash .ai/scripts/ai-kit{state_flag} approve {task_id} --role {role} "
+        f"{verdict_flag} {pass_value} --reason '<your findings>' --runner {runner_name} "
+        f"--model {model or ''} --agent-id {agent_id}"
+    )
+    reject_cmd = (
+        f"bash .ai/scripts/ai-kit{state_flag} transition {task_id} reject --actor {role_key} "
+        f"--detail '<your findings>'"
+    )
+    handoff = {
+        "schema_version": 1,
+        "role": role,
+        "task": {
+            "id": task["id"], "title": task["title"], "owner": task["owner"],
+            "acceptance": task["acceptance"], "files": task["files"], "evidence": list(task.get("evidence", [])),
+        },
+        "execution": {"runner": runner_name, "model": model, "agent_id": agent_id},
+        "instructions": (
+            f"You are performing an independent {role} of task {task['id']}, separate from the executor "
+            f"that implemented it. Inspect the change against the acceptance criteria above; do not trust "
+            f"the executor's own claim of completion. If it meets the criteria, run exactly: `{approve_cmd}` "
+            f"(this writes your own evidence JSON with kind/{verdict_flag.lstrip('--')}/runner/model/agent_id "
+            f"and advances the task). Otherwise, run: `{reject_cmd}`. Do not fabricate a pass/approve verdict."
+        ),
+    }
+    handoff_path = workspace(path) / "handoffs" / f"{role}_{task_id}.json"
+    handoff_path.parent.mkdir(parents=True, exist_ok=True)
+    handoff_path.write_text(json.dumps(handoff, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+
+    prompt = (
+        f"You are the {role} reviewer for task {task['id']}. Read {display_path(handoff_path)} "
+        f"and follow its instructions exactly. Do not violate AGENTS.md."
+    )
+    cmd = _render_runner_command(runner["command"], prompt, model)
+    print(f"Dispatching {role} approval for {task_id} to runner '{runner_name}/{model}'...", file=sys.stderr)
+    # shell=True: same G4 threat model as cmd_dispatch above (template comes
+    # from .ai-config/runners.yaml). stdin is closed for the same
+    # non-interactive-only reason documented in runners.yaml.
+    result = _sp.run(cmd, shell=True, cwd=str(ROOT), stdin=_sp.DEVNULL)
+    audit = {
+        "ts": now(), "task": task_id, "role": role, "runner": runner_name, "model": model,
+        "command": cmd, "exit_code": result.returncode, "handoff_file": display_path(handoff_path),
+    }
+    audit_path = workspace(path) / f"dispatch_log_{role}_{task_id}.json"
+    audit_path.parent.mkdir(parents=True, exist_ok=True)
+    audit_path.write_text(json.dumps(audit, indent=2) + "\n", encoding="utf-8")
+    if result.returncode != 0:
+        raise EngineError(f"{role} runner {runner_name} exited with code {result.returncode}")
+
+    state = load(path)
+    task = task_map(state).get(task_id)
+    if task["status"] not in {pass_status, "todo", "blocked"}:
+        raise EngineError(
+            f"{role} runner {runner_name} exited 0 but task {task_id} is still '{task['status']}' "
+            f"(expected '{pass_status}' on approval, or 'todo'/'blocked' on rejection); the runner must "
+            f"call 'ai-kit approve' or 'ai-kit transition reject' before returning"
+        )
+    return task
+
+
+def _run_post_completion(task_id: str, state_arg: str | None, agent_id: str | None = None) -> dict:
+    """Run verify -> independent QA -> independent review -> close.
+
+    Idempotent and resumable: a task already at 'done' is a safe no-op; a
+    task parked at 'qa-passed' or 'review-approved' (e.g. a prior run
+    stopped partway, or was rejected and re-completed) resumes from the
+    next unfinished phase instead of repeating QA/review that already ran.
+    Serialized per task via a lock file (released in `finally`) so two
+    concurrent triggers for the same task only ever produce one pipeline
+    run; a duplicate call while one is already in flight is a safe no-op.
+    """
+    lock_path = _post_completion_lock_path(task_id, state_arg)
+    if not _acquire_task_lock(lock_path):
+        return {"task": task_id, "post_completion": "already-running"}
+    try:
+        path = state_path(state_arg)
+        state = load(path); validate(state)
+        task = task_map(state).get(task_id)
+        if not task:
+            raise EngineError(f"unknown task: {task_id}")
+        if task["status"] == "done":
+            return {"task": task_id, "post_completion": "noop-already-done"}
+        if task["status"] not in {"implementation-complete", "qa-passed", "review-approved"}:
+            return {"task": task_id, "post_completion": f"noop-status-{task['status']}"}
+
+        event(state, path, "post-completion-start", task, "system", task["status"], task["status"], "automated post-completion pipeline started")
+        save(state, path, state["revision"])
+
+        if task["status"] == "implementation-complete":
+            print(f"[post-completion] {task_id}: verifying...", file=sys.stderr)
+            report = cmd_verify(argparse.Namespace(state=state_arg, id=task_id))
+            if not report["passed"] or report.get("inconclusive"):
+                state = load(path); task = task_map(state).get(task_id)
+                reason = "verify failed" if not report["passed"] else "verify inconclusive (no test/lint/typecheck/build configured)"
+                event(state, path, "post-completion-failed", task, "system", task["status"], task["status"], f"{reason}; task remains at implementation-complete")
+                save(state, path, state["revision"])
+                return {"task": task_id, "post_completion": "verify-failed", "report": report}
+
+            print(f"[post-completion] {task_id}: dispatching QA...", file=sys.stderr)
+            try:
+                task = _dispatch_approval(task_id, "qa", state_arg, agent_id=agent_id)
+            except EngineError as exc:
+                state = load(path); task = task_map(state).get(task_id)
+                event(state, path, "post-completion-failed", task, "system", task["status"], task["status"], f"qa dispatch error: {exc}")
+                save(state, path, state["revision"])
+                return {"task": task_id, "post_completion": "qa-error", "error": str(exc)}
+            if task["status"] != "qa-passed":
+                return {"task": task_id, "post_completion": "qa-rejected", "status": task["status"]}
+
+        if task["status"] == "qa-passed":
+            print(f"[post-completion] {task_id}: dispatching review...", file=sys.stderr)
+            try:
+                task = _dispatch_approval(task_id, "review", state_arg, agent_id=agent_id)
+            except EngineError as exc:
+                state = load(path); task = task_map(state).get(task_id)
+                event(state, path, "post-completion-failed", task, "system", task["status"], task["status"], f"review dispatch error: {exc}")
+                save(state, path, state["revision"])
+                return {"task": task_id, "post_completion": "review-error", "error": str(exc)}
+            if task["status"] != "review-approved":
+                return {"task": task_id, "post_completion": "review-rejected", "status": task["status"]}
+
+        if task["status"] == "review-approved":
+            print(f"[post-completion] {task_id}: closing...", file=sys.stderr)
+            close_args = argparse.Namespace(
+                state=state_arg, id=task_id, action="close", actor="system",
+                detail="Auto-closed by post-completion automation", evidence=None,
+                expected_revision=None, agent_id=None,
+            )
+            task = _retry_transition(close_args)
+
+        return {"task": task_id, "post_completion": "done", "status": task["status"]}
+    finally:
+        _release_task_lock(lock_path)
+
+
 def cmd_pipeline(args: argparse.Namespace) -> dict:
     """Advance one task through dispatch -> verify -> QA -> review -> close.
 
@@ -1903,10 +2151,14 @@ def cmd_pipeline(args: argparse.Namespace) -> dict:
     (the same fallback plain `dispatch` uses); qa/reviewer identities come
     from .ai-config/automation.yaml. Refuses to proceed if QA or review would run
     under the exact same (runner, model) as the executor -- the point of a
-    separate approval phase is a second, independent look.
-    This is a synchronous, manually-invoked chain (no background scheduler,
-    no auto-trigger, no retry/resume across phases) by design for this phase
-    of automation; a stalled/failed phase just stops here and reports why.
+    separate approval phase is a second, independent look. QA and review are
+    each dispatched to their own configured runner (see _dispatch_approval),
+    which must render and record its own verdict; this command never
+    fabricates one.
+    Resumable: if the task is already past dispatch (e.g. a previous run
+    stopped at a failed verify, or was rejected and re-completed), this
+    skips straight to the first unfinished phase instead of re-dispatching
+    the executor.
     """
     state = load(state_path(args.state)); validate(state)
     task = task_map(state).get(args.id)
@@ -1927,38 +2179,21 @@ def cmd_pipeline(args: argparse.Namespace) -> dict:
             f"({rev_runner}/{rev_model}); review must run under a different runner or model"
         )
 
-    print(f"[pipeline] {task['id']}: dispatching to executor {exec_runner}/{exec_model}...", file=sys.stderr)
-    cmd_dispatch(argparse.Namespace(state=args.state, id=task["id"], runner=exec_runner, model=exec_model, agent_id=args.agent_id))
+    if task["status"] in {"todo", "in-progress"}:
+        print(f"[pipeline] {task['id']}: dispatching to executor {exec_runner}/{exec_model}...", file=sys.stderr)
+        cmd_dispatch(argparse.Namespace(state=args.state, id=task["id"], runner=exec_runner, model=exec_model, agent_id=args.agent_id))
+    else:
+        print(f"[pipeline] {task['id']}: resuming from status {task['status']}...", file=sys.stderr)
 
-    print(f"[pipeline] {task['id']}: verifying...", file=sys.stderr)
-    report = cmd_verify(argparse.Namespace(state=args.state, id=task["id"]))
-    if not report["passed"]:
+    result = _run_post_completion(task["id"], args.state, agent_id=args.agent_id)
+    state = load(state_path(args.state))
+    task = task_map(state).get(task["id"])
+    if not task or task["status"] != "done":
+        status = task["status"] if task else "unknown"
         raise EngineError(
-            f"pipeline stopped: verify failed for {task['id']}; inspect the report above, fix, "
-            f"then re-run 'ai-kit pipeline {task['id']}' (task remains at implementation-complete)"
+            f"pipeline stopped for {args.id} at status '{status}' ({result.get('post_completion')}); "
+            f"inspect the report/events above, fix, then re-run 'ai-kit pipeline {args.id}'"
         )
-
-    print(f"[pipeline] {task['id']}: QA approval via {qa_runner}/{qa_model}...", file=sys.stderr)
-    qa_agent_id = uuid.uuid4().hex[:8]
-    cmd_approve(argparse.Namespace(
-        state=args.state, id=task["id"], role="qa", status=None,
-        reason=f"Auto-approved by pipeline ({qa_runner}/{qa_model})",
-        runner=qa_runner, model=qa_model, agent_id=qa_agent_id,
-    ))
-
-    print(f"[pipeline] {task['id']}: review approval via {rev_runner}/{rev_model}...", file=sys.stderr)
-    rev_agent_id = uuid.uuid4().hex[:8]
-    cmd_approve(argparse.Namespace(
-        state=args.state, id=task["id"], role="review", status=None,
-        reason=f"Auto-approved by pipeline ({rev_runner}/{rev_model})",
-        runner=rev_runner, model=rev_model, agent_id=rev_agent_id,
-    ))
-
-    print(f"[pipeline] {task['id']}: closing...", file=sys.stderr)
-    cmd_transition(argparse.Namespace(
-        state=args.state, id=task["id"], action="close", actor="system",
-        detail="Auto-closed by ai-kit pipeline", evidence=None, expected_revision=None, agent_id=None,
-    ))
     return {
         "task": task["id"], "status": "done",
         "executor": f"{exec_runner}/{exec_model}",
@@ -2145,7 +2380,7 @@ def cmd_verify(args: argparse.Namespace) -> dict:
     task = task_map(state).get(args.id)
     if not task:
         raise EngineError(f"unknown task: {args.id}")
-    report = {"task": task["id"], "checks": [], "passed": True}
+    report = {"task": task["id"], "checks": [], "passed": True, "inconclusive": False}
     print(f"Verifying task {task['id']}...", file=sys.stderr)
     manifest = _config_path("kit.yaml")
     executed_quality_checks = 0
@@ -2179,6 +2414,12 @@ def cmd_verify(args: argparse.Namespace) -> dict:
             ".ai-config/kit.yaml's verification section for a real project."
         )
         report["warning"] = warning
+        # No test/lint/typecheck/build command actually ran, so a "passed"
+        # verdict here is inconclusive, not a real green signal. Standalone
+        # `ai-kit verify` still reports it (unchanged CLI behavior); callers
+        # that auto-advance a task on verify success (post-completion
+        # automation) must treat inconclusive the same as a failure.
+        report["inconclusive"] = True
         print(f"  WARNING: {warning}", file=sys.stderr)
     gates = ROOT / ".ai" / "scripts" / "check-gates.sh"
     if gates.exists():
