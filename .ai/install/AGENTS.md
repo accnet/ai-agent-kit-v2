@@ -331,13 +331,16 @@ because their outcomes are deterministic and mechanically checkable.
 
 `ai-kit pipeline` itself only ever advances **one already-created task**
 through its execution lifecycle; it is not a multi-task or multi-stage
-scheduler. It is synchronous, has no background scheduler, auto-trigger, or
-retry/resume across phases (see its own docstring in `ai_kit.py`), and a
-stalled or failed phase simply stops and reports why — rerun it after fixing
-the cause. Running it across a feature's full task graph means invoking it
-(or `dispatch-ready`) once per ready task, repeated as the graph unblocks;
-that repetition is a documented operating procedure, not a hidden capability
-to build.
+scheduler. It is synchronous (each phase blocks until the assigned runner
+returns), has no background scheduler or auto-trigger, and there is no
+automatic retry across phases (see its own docstring in `ai_kit.py`) -- a
+stalled or failed phase simply stops and reports why. It is resume-capable:
+if a previous run stopped partway (e.g. verify failed, or QA/review rejected),
+re-running it skips straight to the first unfinished phase instead of
+re-dispatching the executor. Running it across a feature's full task graph
+means invoking it (or `dispatch-ready`) once per ready task, repeated as the
+graph unblocks; that repetition is a documented operating procedure, not a
+hidden capability to build.
 
 ## Gates
 

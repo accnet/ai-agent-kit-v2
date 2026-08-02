@@ -17,6 +17,7 @@ import tempfile
 import textwrap
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ENGINE_DIR = Path(__file__).resolve().parents[1] / ".ai" / "engine"
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -1565,6 +1566,430 @@ class RegistryEndToEndRoutingTests(EngineTestCase):
         for role in ("architect", "qa", "security", "integration", "performance"):
             registry = ai_kit._load_registry()
             self.assertIn("ai", registry["owners"].get(role, []), f"role '{role}' missing 'ai' in owners")
+
+
+class PostCompletionConfigTests(EngineTestCase):
+    """_load_post_completion_config / _post_completion_enabled: opt-in switch
+    read from .ai-config/automation.yaml, defaulting to disabled."""
+
+    def _write_automation(self, body: str) -> None:
+        (self.root / ".ai-config" / "automation.yaml").write_text(body, encoding="utf-8")
+
+    def test_missing_automation_yaml_defaults_disabled(self) -> None:
+        self.assertFalse(ai_kit._post_completion_enabled())
+
+    def test_missing_post_completion_section_defaults_disabled(self) -> None:
+        self._write_automation("roles:\n  qa:\n    runner: x\n  reviewer:\n    runner: y\n")
+        self.assertFalse(ai_kit._post_completion_enabled())
+
+    def test_enabled_true_is_parsed(self) -> None:
+        self._write_automation(
+            "roles:\n  qa:\n    runner: x\n  reviewer:\n    runner: y\n"
+            "post_completion:\n  enabled: true\n"
+        )
+        self.assertTrue(ai_kit._post_completion_enabled())
+
+    def test_enabled_false_is_parsed(self) -> None:
+        self._write_automation(
+            "roles:\n  qa:\n    runner: x\n  reviewer:\n    runner: y\n"
+            "post_completion:\n  enabled: false\n"
+        )
+        self.assertFalse(ai_kit._post_completion_enabled())
+
+    def test_malformed_enabled_value_defaults_disabled(self) -> None:
+        self._write_automation(
+            "roles:\n  qa:\n    runner: x\n  reviewer:\n    runner: y\n"
+            "post_completion:\n  enabled: maybe\n"
+        )
+        self.assertFalse(ai_kit._post_completion_enabled())
+
+
+class TaskLockTests(EngineTestCase):
+    """_acquire_task_lock / _release_task_lock: best-effort exclusive lock
+    file used to serialize post-completion runs per task."""
+
+    def test_acquire_then_release_allows_reacquire(self) -> None:
+        lock_path = self.root / "locks" / "T1.lock"
+        self.assertTrue(ai_kit._acquire_task_lock(lock_path))
+        self.assertFalse(ai_kit._acquire_task_lock(lock_path))
+        ai_kit._release_task_lock(lock_path)
+        self.assertTrue(ai_kit._acquire_task_lock(lock_path))
+
+    def test_release_missing_lock_is_a_noop(self) -> None:
+        lock_path = self.root / "locks" / "missing.lock"
+        ai_kit._release_task_lock(lock_path)  # must not raise
+
+
+class AutomationRunnersTestCase(EngineTestCase):
+    """Base fixture: a distinct executor/qa/reviewer runner identity in
+    .ai-config/runners.yaml + automation.yaml, and a task started through to
+    'implementation-complete' so _dispatch_approval/_run_post_completion/
+    cmd_pipeline tests can begin from a realistic starting point."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        (self.root / ".ai-config" / "runners.yaml").write_text(
+            "default_executor: \"executor-runner\"\n"
+            "default_model: \"exec-model\"\n"
+            "\n"
+            "runners:\n"
+            "  executor-runner:\n"
+            "    command: \"true {prompt} {model}\"\n"
+            "    models: [\"exec-model\"]\n"
+            "  qa-runner:\n"
+            "    command: \"true {prompt} {model}\"\n"
+            "    models: [\"qa-model\"]\n"
+            "  reviewer-runner:\n"
+            "    command: \"true {prompt} {model}\"\n"
+            "    models: [\"reviewer-model\"]\n",
+            encoding="utf-8",
+        )
+        self._write_automation_roles(qa="qa-runner", qa_model="qa-model",
+                                      reviewer="reviewer-runner", reviewer_model="reviewer-model")
+        self.init_workflow()
+        self.add_task("T1", owner="backend")
+
+    def _write_automation_roles(self, qa: str, qa_model: str, reviewer: str, reviewer_model: str) -> None:
+        (self.root / ".ai-config" / "automation.yaml").write_text(
+            "roles:\n"
+            f"  qa:\n    runner: {qa}\n    model: {qa_model}\n"
+            f"  reviewer:\n    runner: {reviewer}\n    model: {reviewer_model}\n",
+            encoding="utf-8",
+        )
+
+    def bring_to_implementation_complete(self, task_id: str = "T1") -> None:
+        self.transition(task_id, "start", actor="backend")
+        self.transition(task_id, "complete", actor="backend")
+
+
+class DispatchApprovalTests(AutomationRunnersTestCase):
+    """_dispatch_approval: writes a handoff, shells out to the configured
+    qa/reviewer runner, and requires the runner to have moved the task's
+    status itself (never fabricates a verdict)."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.bring_to_implementation_complete()
+
+    def test_qa_dispatch_success_when_runner_calls_approve(self) -> None:
+        def fake_run(cmd, **kwargs):
+            ai_kit.cmd_approve(ns(state=str(self.state_file), id="T1", role="qa", status="pass",
+                                   reason="looks good", runner="qa-runner", model="qa-model", agent_id="a1"))
+            return subprocess.CompletedProcess(cmd, 0)
+
+        with mock.patch("subprocess.run", side_effect=fake_run):
+            task = ai_kit._dispatch_approval("T1", "qa", str(self.state_file))
+        self.assertEqual(task["status"], "qa-passed")
+
+    def test_review_dispatch_success_when_runner_calls_approve(self) -> None:
+        self.transition("T1", "qa-pass", actor="qa", evidence=[self.qa_evidence("T1")])
+
+        def fake_run(cmd, **kwargs):
+            ai_kit.cmd_approve(ns(state=str(self.state_file), id="T1", role="review", status="approve",
+                                   reason="looks good", runner="reviewer-runner", model="reviewer-model",
+                                   agent_id="a1"))
+            return subprocess.CompletedProcess(cmd, 0)
+
+        with mock.patch("subprocess.run", side_effect=fake_run):
+            task = ai_kit._dispatch_approval("T1", "review", str(self.state_file))
+        self.assertEqual(task["status"], "review-approved")
+
+    def test_review_dispatch_success_when_runner_rejects(self) -> None:
+        self.transition("T1", "qa-pass", actor="qa", evidence=[self.qa_evidence("T1")])
+
+        def fake_run(cmd, **kwargs):
+            ai_kit.cmd_transition(ns(state=str(self.state_file), id="T1", action="reject",
+                                      actor="reviewer", detail="missing tests"))
+            return subprocess.CompletedProcess(cmd, 0)
+
+        with mock.patch("subprocess.run", side_effect=fake_run):
+            task = ai_kit._dispatch_approval("T1", "review", str(self.state_file))
+        self.assertEqual(task["status"], "todo")
+
+    def test_raises_when_runner_exits_nonzero(self) -> None:
+        with mock.patch("subprocess.run", return_value=subprocess.CompletedProcess("x", 1)):
+            with self.assertRaises(ai_kit.EngineError) as ctx:
+                ai_kit._dispatch_approval("T1", "qa", str(self.state_file))
+        self.assertIn("exited with code 1", str(ctx.exception))
+
+    def test_raises_when_runner_exits_zero_without_acting(self) -> None:
+        with mock.patch("subprocess.run", return_value=subprocess.CompletedProcess("x", 0)):
+            with self.assertRaises(ai_kit.EngineError) as ctx:
+                ai_kit._dispatch_approval("T1", "qa", str(self.state_file))
+        self.assertIn("must call", str(ctx.exception))
+
+    def test_raises_for_unsupported_role(self) -> None:
+        with self.assertRaises(ai_kit.EngineError) as ctx:
+            ai_kit._dispatch_approval("T1", "bogus", str(self.state_file))
+        self.assertIn("unsupported approval role", str(ctx.exception))
+
+    def test_raises_when_task_not_in_expected_status_for_role(self) -> None:
+        # T1 is 'implementation-complete'; review approval expects 'qa-passed'.
+        with self.assertRaises(ai_kit.EngineError) as ctx:
+            ai_kit._dispatch_approval("T1", "review", str(self.state_file))
+        self.assertIn("expected qa-passed", str(ctx.exception))
+
+    def test_raises_when_qa_identity_collides_with_executor(self) -> None:
+        self._write_automation_roles(qa="executor-runner", qa_model="exec-model",
+                                      reviewer="reviewer-runner", reviewer_model="reviewer-model")
+        with self.assertRaises(ai_kit.EngineError) as ctx:
+            ai_kit._dispatch_approval("T1", "qa", str(self.state_file))
+        self.assertIn("must run under a different runner or model", str(ctx.exception))
+
+
+class RunPostCompletionTests(AutomationRunnersTestCase):
+    """_run_post_completion: verify -> independent QA -> independent review
+    -> close, resumable and idempotent."""
+
+    def _prepare_task_at(self, status: str, task_id: str = "T1") -> None:
+        if status == "todo":
+            return
+        self.bring_to_implementation_complete(task_id)
+        if status == "implementation-complete":
+            return
+        self.transition(task_id, "qa-pass", actor="qa", evidence=[self.qa_evidence(task_id)])
+        if status == "qa-passed":
+            return
+        self.transition(task_id, "review-approve", actor="reviewer", evidence=[self.review_evidence(task_id)])
+        if status == "review-approved":
+            return
+        self.transition(task_id, "close", actor="reviewer")
+
+    def test_noop_when_already_done(self) -> None:
+        self._prepare_task_at("done")
+        result = ai_kit._run_post_completion("T1", str(self.state_file))
+        self.assertEqual(result["post_completion"], "noop-already-done")
+
+    def test_noop_when_status_not_eligible(self) -> None:
+        self._prepare_task_at("todo")
+        result = ai_kit._run_post_completion("T1", str(self.state_file))
+        self.assertEqual(result["post_completion"], "noop-status-todo")
+
+    def test_raises_for_unknown_task(self) -> None:
+        with self.assertRaises(ai_kit.EngineError):
+            ai_kit._run_post_completion("does-not-exist", str(self.state_file))
+
+    def test_verify_failure_leaves_task_at_implementation_complete(self) -> None:
+        self._prepare_task_at("implementation-complete")
+        fail_report = {"task": "T1", "checks": [], "passed": False, "inconclusive": False}
+        with mock.patch.object(ai_kit, "cmd_verify", return_value=fail_report):
+            result = ai_kit._run_post_completion("T1", str(self.state_file))
+        self.assertEqual(result["post_completion"], "verify-failed")
+        task = ai_kit.task_map(ai_kit.load(self.state_file))["T1"]
+        self.assertEqual(task["status"], "implementation-complete")
+
+    def test_verify_inconclusive_is_treated_as_failure(self) -> None:
+        self._prepare_task_at("implementation-complete")
+        inconclusive_report = {"task": "T1", "checks": [], "passed": True, "inconclusive": True}
+        with mock.patch.object(ai_kit, "cmd_verify", return_value=inconclusive_report):
+            result = ai_kit._run_post_completion("T1", str(self.state_file))
+        self.assertEqual(result["post_completion"], "verify-failed")
+        task = ai_kit.task_map(ai_kit.load(self.state_file))["T1"]
+        self.assertEqual(task["status"], "implementation-complete")
+
+    def test_qa_dispatch_error_stops_pipeline(self) -> None:
+        self._prepare_task_at("implementation-complete")
+        pass_report = {"task": "T1", "checks": [], "passed": True, "inconclusive": False}
+        with mock.patch.object(ai_kit, "cmd_verify", return_value=pass_report), \
+             mock.patch.object(ai_kit, "_dispatch_approval", side_effect=ai_kit.EngineError("qa runner boom")):
+            result = ai_kit._run_post_completion("T1", str(self.state_file))
+        self.assertEqual(result["post_completion"], "qa-error")
+        task = ai_kit.task_map(ai_kit.load(self.state_file))["T1"]
+        self.assertEqual(task["status"], "implementation-complete")
+
+    def test_qa_rejected_stops_before_review(self) -> None:
+        self._prepare_task_at("implementation-complete")
+        pass_report = {"task": "T1", "checks": [], "passed": True, "inconclusive": False}
+
+        def fake_reject(task_id, role, state_arg, agent_id=None):
+            return ai_kit.cmd_transition(ns(state=state_arg, id=task_id, action="reject",
+                                             actor="qa", detail="not good enough"))
+
+        with mock.patch.object(ai_kit, "cmd_verify", return_value=pass_report), \
+             mock.patch.object(ai_kit, "_dispatch_approval", side_effect=fake_reject):
+            result = ai_kit._run_post_completion("T1", str(self.state_file))
+        self.assertEqual(result["post_completion"], "qa-rejected")
+        self.assertEqual(result["status"], "todo")
+
+    def test_review_rejected_stops_before_close(self) -> None:
+        self._prepare_task_at("qa-passed")
+
+        def fake_reject_review(task_id, role, state_arg, agent_id=None):
+            self.assertEqual(role, "review")
+            return ai_kit.cmd_transition(ns(state=state_arg, id=task_id, action="reject",
+                                             actor="reviewer", detail="regression risk"))
+
+        with mock.patch.object(ai_kit, "_dispatch_approval", side_effect=fake_reject_review):
+            result = ai_kit._run_post_completion("T1", str(self.state_file))
+        self.assertEqual(result["post_completion"], "review-rejected")
+        self.assertEqual(result["status"], "todo")
+
+    def test_full_chain_reaches_done(self) -> None:
+        self._prepare_task_at("implementation-complete")
+        pass_report = {"task": "T1", "checks": [], "passed": True, "inconclusive": False}
+
+        def fake_dispatch(task_id, role, state_arg, agent_id=None):
+            action = "qa-pass" if role == "qa" else "review-approve"
+            actor = "qa" if role == "qa" else "reviewer"
+            evidence = self.qa_evidence(task_id) if role == "qa" else self.review_evidence(task_id)
+            return ai_kit.cmd_transition(ns(state=state_arg, id=task_id, action=action, actor=actor,
+                                             evidence=[evidence]))
+
+        with mock.patch.object(ai_kit, "cmd_verify", return_value=pass_report), \
+             mock.patch.object(ai_kit, "_dispatch_approval", side_effect=fake_dispatch):
+            result = ai_kit._run_post_completion("T1", str(self.state_file))
+        self.assertEqual(result["post_completion"], "done")
+        self.assertEqual(result["status"], "done")
+
+    def test_resumes_from_qa_passed_without_reverifying(self) -> None:
+        self._prepare_task_at("qa-passed")
+
+        def fake_dispatch(task_id, role, state_arg, agent_id=None):
+            self.assertEqual(role, "review")
+            return ai_kit.cmd_transition(ns(state=state_arg, id=task_id, action="review-approve",
+                                             actor="reviewer", evidence=[self.review_evidence(task_id)]))
+
+        with mock.patch.object(ai_kit, "cmd_verify") as verify_mock, \
+             mock.patch.object(ai_kit, "_dispatch_approval", side_effect=fake_dispatch):
+            result = ai_kit._run_post_completion("T1", str(self.state_file))
+        verify_mock.assert_not_called()
+        self.assertEqual(result["post_completion"], "done")
+
+    def test_resumes_from_review_approved_by_only_closing(self) -> None:
+        self._prepare_task_at("review-approved")
+        with mock.patch.object(ai_kit, "cmd_verify") as verify_mock, \
+             mock.patch.object(ai_kit, "_dispatch_approval") as dispatch_mock:
+            result = ai_kit._run_post_completion("T1", str(self.state_file))
+        verify_mock.assert_not_called()
+        dispatch_mock.assert_not_called()
+        self.assertEqual(result["post_completion"], "done")
+        self.assertEqual(result["status"], "done")
+
+    def test_returns_already_running_when_lock_is_held(self) -> None:
+        self._prepare_task_at("implementation-complete")
+        lock_path = ai_kit._post_completion_lock_path("T1", str(self.state_file))
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        lock_path.write_text("999", encoding="utf-8")
+        result = ai_kit._run_post_completion("T1", str(self.state_file))
+        self.assertEqual(result, {"task": "T1", "post_completion": "already-running"})
+
+    def test_lock_is_released_after_run_completes(self) -> None:
+        self._prepare_task_at("done")
+        ai_kit._run_post_completion("T1", str(self.state_file))
+        lock_path = ai_kit._post_completion_lock_path("T1", str(self.state_file))
+        self.assertFalse(lock_path.exists())
+
+
+class PipelineOrchestrationTests(AutomationRunnersTestCase):
+    """cmd_pipeline: dispatch -> verify -> QA -> review -> close, refusing to
+    run QA/review under the same identity as the executor."""
+
+    def _args(self, **overrides) -> argparse.Namespace:
+        base = dict(state=str(self.state_file), id="T1", agent_id=None)
+        base.update(overrides)
+        return argparse.Namespace(**base)
+
+    def test_raises_when_qa_identity_collides_with_executor(self) -> None:
+        self._write_automation_roles(qa="executor-runner", qa_model="exec-model",
+                                      reviewer="reviewer-runner", reviewer_model="reviewer-model")
+        with self.assertRaises(ai_kit.EngineError) as ctx:
+            ai_kit.cmd_pipeline(self._args())
+        self.assertIn("role 'qa'", str(ctx.exception))
+
+    def test_raises_when_reviewer_identity_collides_with_executor(self) -> None:
+        self._write_automation_roles(qa="qa-runner", qa_model="qa-model",
+                                      reviewer="executor-runner", reviewer_model="exec-model")
+        with self.assertRaises(ai_kit.EngineError) as ctx:
+            ai_kit.cmd_pipeline(self._args())
+        self.assertIn("role 'reviewer'", str(ctx.exception))
+
+    def test_dispatches_executor_when_task_is_todo_then_reaches_done(self) -> None:
+        def fake_dispatch(args) -> dict:
+            ai_kit.cmd_transition(ns(state=args.state, id=args.id, action="start", actor="backend"))
+            ai_kit.cmd_transition(ns(state=args.state, id=args.id, action="complete", actor="backend"))
+            return {"task": args.id, "status": "dispatched"}
+
+        def fake_post_completion(task_id, state_arg, agent_id=None) -> dict:
+            ai_kit.cmd_transition(ns(state=state_arg, id=task_id, action="qa-pass", actor="qa",
+                                      evidence=[self.qa_evidence(task_id)]))
+            ai_kit.cmd_transition(ns(state=state_arg, id=task_id, action="review-approve", actor="reviewer",
+                                      evidence=[self.review_evidence(task_id)]))
+            ai_kit.cmd_transition(ns(state=state_arg, id=task_id, action="close", actor="reviewer"))
+            return {"task": task_id, "post_completion": "done", "status": "done"}
+
+        with mock.patch.object(ai_kit, "cmd_dispatch", side_effect=fake_dispatch) as dispatch_mock, \
+             mock.patch.object(ai_kit, "_run_post_completion", side_effect=fake_post_completion):
+            result = ai_kit.cmd_pipeline(self._args())
+        dispatch_mock.assert_called_once()
+        self.assertEqual(result["status"], "done")
+        self.assertIn("executor-runner/exec-model", result["executor"])
+        self.assertIn("qa-runner/qa-model", result["qa"])
+        self.assertIn("reviewer-runner/reviewer-model", result["reviewer"])
+
+    def test_does_not_redispatch_when_already_past_dispatch(self) -> None:
+        self.bring_to_implementation_complete()
+
+        def fake_post_completion(task_id, state_arg, agent_id=None) -> dict:
+            ai_kit.cmd_transition(ns(state=state_arg, id=task_id, action="qa-pass", actor="qa",
+                                      evidence=[self.qa_evidence(task_id)]))
+            ai_kit.cmd_transition(ns(state=state_arg, id=task_id, action="review-approve", actor="reviewer",
+                                      evidence=[self.review_evidence(task_id)]))
+            ai_kit.cmd_transition(ns(state=state_arg, id=task_id, action="close", actor="reviewer"))
+            return {"task": task_id, "post_completion": "done", "status": "done"}
+
+        with mock.patch.object(ai_kit, "cmd_dispatch") as dispatch_mock, \
+             mock.patch.object(ai_kit, "_run_post_completion", side_effect=fake_post_completion):
+            result = ai_kit.cmd_pipeline(self._args())
+        dispatch_mock.assert_not_called()
+        self.assertEqual(result["status"], "done")
+
+    def test_raises_when_pipeline_stalls_before_done(self) -> None:
+        self.bring_to_implementation_complete()
+        with mock.patch.object(ai_kit, "_run_post_completion",
+                                return_value={"post_completion": "qa-rejected", "status": "todo"}):
+            with self.assertRaises(ai_kit.EngineError) as ctx:
+                ai_kit.cmd_pipeline(self._args())
+        self.assertIn("implementation-complete", str(ctx.exception))
+        self.assertIn("qa-rejected", str(ctx.exception))
+
+
+class TransitionCompletePostCompletionIntegrationTests(EngineTestCase):
+    """cmd_transition('complete') only chains into _run_post_completion when
+    .ai-config/automation.yaml opts in via post_completion.enabled: true."""
+
+    def test_complete_does_not_trigger_post_completion_by_default(self) -> None:
+        self.init_workflow()
+        self.add_task("T1", owner="backend")
+        self.transition("T1", "start", actor="backend")
+        with mock.patch.object(ai_kit, "_run_post_completion") as post_mock:
+            task = self.transition("T1", "complete", actor="backend")
+        post_mock.assert_not_called()
+        self.assertEqual(task["status"], "implementation-complete")
+
+    def test_complete_triggers_post_completion_when_enabled(self) -> None:
+        (self.root / ".ai-config" / "automation.yaml").write_text(
+            "post_completion:\n  enabled: true\n", encoding="utf-8")
+        self.init_workflow()
+        self.add_task("T1", owner="backend")
+        self.transition("T1", "start", actor="backend")
+        with mock.patch.object(ai_kit, "_run_post_completion",
+                                return_value={"post_completion": "noop-status-implementation-complete"}) as post_mock:
+            self.transition("T1", "complete", actor="backend")
+        post_mock.assert_called_once()
+        self.assertEqual(post_mock.call_args.args[0], "T1")
+
+    def test_complete_records_event_when_post_completion_raises(self) -> None:
+        (self.root / ".ai-config" / "automation.yaml").write_text(
+            "post_completion:\n  enabled: true\n", encoding="utf-8")
+        self.init_workflow()
+        self.add_task("T1", owner="backend")
+        self.transition("T1", "start", actor="backend")
+        with mock.patch.object(ai_kit, "_run_post_completion", side_effect=ai_kit.EngineError("boom")):
+            task = self.transition("T1", "complete", actor="backend")
+        self.assertEqual(task["status"], "implementation-complete")
+        state = ai_kit.load(self.state_file)
+        actions = [item["action"] for item in state["events"]]
+        self.assertIn("post-completion-failed", actions)
 
 
 if __name__ == "__main__":
