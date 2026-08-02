@@ -200,6 +200,30 @@ work — fix it and re-run `ai-kit pipeline <task-id>`. There is deliberately
 no auto-triggering scheduler and no retry/resume across phases yet: this is
 a manually-invoked, single-task chain, not a background service.
 
+`ai-kit transition <task-id> complete` can optionally chain straight into
+that same verify -> QA -> review -> close sequence on its own, without a
+follow-up `pipeline` call. This is opt in via `.ai-config/automation.yaml`:
+
+```yaml
+post_completion:
+  enabled: true
+```
+
+Missing the `post_completion` section, `enabled: false`, or any
+non-boolean-`true` value all leave `complete` as a plain status
+transition (the pre-existing behavior) — the switch defaults to off so
+existing projects are unaffected until they opt in. When enabled, the run
+is idempotent and resumable: a task already at `done` is a safe no-op; one
+parked at `qa-passed` or `review-approved` (a prior run stopped partway, or
+a verdict rejected it and it was re-completed) resumes from the next
+unfinished phase instead of re-running QA/review that already passed. A
+per-task lock file serializes concurrent triggers for the same task so two
+racing `complete` calls only ever produce one pipeline run — the loser
+observes `post_completion: "already-running"` rather than double-dispatching
+QA/review. A `verify`, QA, or review failure leaves the task at its current
+status and records a `post-completion-failed` event instead of raising past
+the caller; `complete` itself still succeeds.
+
 Every task also records `base_commit` (git HEAD at creation),
 `context_revision` (its context's `.ai-config/contexts.yaml` revision at creation),
 and `epic_revision` (its epic's Specification revision in `.ai-config/epics.yaml`
@@ -235,10 +259,27 @@ drift reads. The board and `drift` use the same drift computation. `--write`
 also creates `.ai-work/board.md`; it never changes `workflow.json` or its
 revision.
 
-Run `bash .ai/scripts/test-kit.sh` to exercise the engine's own behavior:
+Run `bash .ai/scripts/test-kit.sh` (equivalently
+`python -m unittest discover -s tests -v`) to exercise the engine's own
+behavior. All contract coverage lives under `tests/`, the one upstream test
+directory — nothing under `.ai/engine/` itself is a test root.
 `tests/test_ai_kit.py` (stdlib `unittest`, no third-party deps) drives the
 CLI as a subprocess against isolated tempfile-based `--state` paths, covering
 the task lifecycle, self-review guard, block/unblock/reject, context/epic/
-contract drift, board filters and board/drift flag parity, and the `graph`
-raw-output regression. It never touches this repo's real `.ai-work` state or
-leaves residue in `.ai-config/contexts.yaml`/`.ai-config/epics.yaml`.
+contract drift, board filters and board/drift flag parity, the `graph`
+raw-output regression, and the opt-in post-completion pipeline (see above).
+It never touches this repo's real `.ai-work` state or leaves residue in
+`.ai-config/contexts.yaml`/`.ai-config/epics.yaml`.
+
+The rest of `tests/` pins contracts that are easy to silently break because
+nothing else enforces them: `test_agents_conformance.py` reachability-checks
+every role/skill routing table this file documents against
+`.ai-config/registry.yaml`; `test_skill_system.py` and
+`test_architecture_discovery.py` cover skill routing and the read-only
+`architecture discover` scan; `test_visualizer_contract.py` and
+`test_dag_browser.py` pin the `dag.json` payload shape against the fields
+`.visualizer/dag.html` actually reads; and `test_install_parity.py` asserts
+that `.ai/install/config/` and `.ai/install/templates/.visualizer/` — the
+copies `install.sh` seeds new projects from — stay in sync with this repo's
+own live `.ai-config/` and `.visualizer/`, so a fresh install doesn't
+silently route or render less than the repo it was copied from.
