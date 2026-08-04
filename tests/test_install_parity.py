@@ -8,11 +8,15 @@ from __future__ import annotations
 
 import re
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO_ROOT / ".ai" / "engine"))
+import ai_kit  # noqa: E402
+
 TEMPLATE_CONFIG = REPO_ROOT / ".ai" / "install" / "config"
 LIVE_VISUALIZER = REPO_ROOT / ".visualizer"
 TEMPLATE_VISUALIZER = REPO_ROOT / ".ai" / "install" / "templates" / ".visualizer"
@@ -43,6 +47,22 @@ class InstallConfigTests(unittest.TestCase):
             self.assertEqual({p.name for p in installed.glob("*.yaml")}, EXPECTED_CONFIGS)
             for name in EXPECTED_CONFIGS:
                 self.assertEqual((installed / name).read_bytes(), (TEMPLATE_CONFIG / name).read_bytes())
+
+    def test_automation_seed_has_manual_roles_with_valid_runner_models(self) -> None:
+        """A fresh install must not dispatch QA/review until enabled, and its
+        configured primary/backup runner:model pairs must resolve."""
+        roles = ai_kit._load_automation_roles()
+        self.assertFalse(roles["qa"]["enabled"])
+        self.assertFalse(roles["reviewer"]["enabled"])
+        self.assertTrue(ai_kit._load_post_completion_config()["enabled"])
+        for role in ("qa", "reviewer"):
+            config = roles[role]
+            for runner_key, model_key in (("runner", "model"), ("backup_runner", "backup_model")):
+                runner = config.get(runner_key)
+                if runner:
+                    resolved_name, _entry, resolved_model = ai_kit._resolve_runner(runner, config.get(model_key))
+                    self.assertEqual(resolved_name, runner)
+                    self.assertEqual(resolved_model, config.get(model_key))
 
     def test_project_owned_configs_ship_empty(self) -> None:
         """contexts.yaml and epics.yaml describe one specific project. The
