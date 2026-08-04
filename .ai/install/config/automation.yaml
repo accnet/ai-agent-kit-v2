@@ -1,7 +1,9 @@
 roles:
   qa:
-    runner: opencode-cli
-    model: deepseek-v4-flash
+    runner: codex-cli
+    model: gpt-5.4-mini
   reviewer:
-    runner: opencode-cli
-    model: deepseek-v4-pro
+    runner: codex-cli
+    model: gpt-5.4-mini
+post_completion:
+  enabled: true
