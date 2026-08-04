@@ -37,10 +37,10 @@ add_entry() {
 }
 
 # The complete .ai tree is the install source. This makes copying only .ai
-# sufficient; root-level adapters are materialized from templates below.
+# sufficient; keep install/config too so the installed kit remains
+# self-contained for later re-installation and configuration seeding.
 while IFS= read -r -d '' file; do
   rel="${file#$AI_ROOT/}"
-  [[ "$file" == "$CONFIG_TEMPLATE_ROOT/"* ]] && continue
   if git -C "$PROJECT_ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     git -C "$PROJECT_ROOT" check-ignore -q -- ".ai/$rel" && continue
   fi

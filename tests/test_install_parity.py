@@ -47,6 +47,17 @@ class InstallConfigTests(unittest.TestCase):
             self.assertEqual({p.name for p in installed.glob("*.yaml")}, EXPECTED_CONFIGS)
             for name in EXPECTED_CONFIGS:
                 self.assertEqual((installed / name).read_bytes(), (TEMPLATE_CONFIG / name).read_bytes())
+            source_files = {
+                path.relative_to(REPO_ROOT / ".ai").as_posix()
+                for path in (REPO_ROOT / ".ai").rglob("*")
+                if path.is_file() and "__pycache__" not in path.parts
+            }
+            installed_files = {
+                path.relative_to(project / ".ai").as_posix()
+                for path in (project / ".ai").rglob("*")
+                if path.is_file() and "__pycache__" not in path.parts
+            }
+            self.assertEqual(installed_files, source_files)
 
     def test_automation_seed_has_manual_roles_with_valid_runner_models(self) -> None:
         """A fresh install must not dispatch QA/review until enabled, and its
