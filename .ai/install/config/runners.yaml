@@ -31,7 +31,7 @@ runners:
     input: "json-file"
   codex-cli:
     command: "codex exec -m {model} --sandbox danger-full-access --ask-for-approval never {prompt}"
-    models: ["gpt-5.6-luna"]
+    models: ["gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.4", "gpt-5.4-mini"]
     provider: "codex-cli"
     description: "Codex CLI runner"
     input: "json-file"
@@ -60,6 +60,9 @@ runners:
 runner_aliases:
   claude: "claude-cli"
   codex-5.6-luna: "codex-cli:gpt-5.6-luna"
+  codex-5.6-terra: "codex-cli:gpt-5.6-terra"
+  codex-5.4: "codex-cli:gpt-5.4"
+  codex-5.4-mini: "codex-cli:gpt-5.4-mini"
   cline-pass: "cline-pass:glm-5.2"
   deepseek-v4-flash: "cline:deepseek-v4-flash"
   deepseek-v4-pro: "cline:deepseek-v4-pro"

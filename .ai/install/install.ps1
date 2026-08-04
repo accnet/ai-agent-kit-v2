@@ -18,10 +18,9 @@ function Add-Entry([string]$Source, [string]$Destination) {
     $entries.Add([pscustomobject]@{ Source = $Source; Destination = $Destination })
 }
 
-# The complete .ai tree is the install source. Root-level adapters are added
-# from templates owned by .ai below.
+# The complete .ai tree is the install source, including install/config so
+# the installed kit stays self-contained for future installation runs.
 Get-ChildItem -LiteralPath $aiRoot -Recurse -File -Force | ForEach-Object {
-    if ($_.FullName.StartsWith($configTemplateRoot, [StringComparison]::OrdinalIgnoreCase)) { return }
     $relative = $_.FullName.Substring($aiRoot.Length).TrimStart('\','/')
     $destination = Join-Path (Join-Path $targetPath '.ai') $relative
     Add-Entry $_.FullName $destination
