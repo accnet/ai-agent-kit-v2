@@ -43,9 +43,15 @@ a small change that skips a standalone brief), before any task is dispatched.
 5. **Tag `--epic`** when tasks share a Specification doc, and register the
    epic (`ai-kit epic add <name> --spec <path>`) so `epic_revision` drift
    tracking applies.
-6. Use `ai-kit plan --idea ... --owner ... --acceptance ...` for the first
-   task of a new brief (creates the roadmap/plan/tasks skeleton in one
-   call); use `ai-kit add-task` for every task after the first.
+6. For a qualified basic edit (all Planner fast-path conditions hold), create
+   one direct `add-task` record and do not create a plan draft. For all other
+   collaborative planning, wait for both explicit user decisions before
+   making runtime tasks: finalize the approved draft with
+   `plan-draft finalize --confirmed-by-user`, then only materialize after a
+   separate “create tasks” answer using `plan-draft materialize
+   --create-tasks`. Use `ai-kit plan --idea ... --owner ... --acceptance ...`
+   for the legacy direct path; use `ai-kit add-task` for every task after the
+   first.
 7. Before handing off, confirm the graph actually resolves: `ai-kit ready`
    returns at least one task, and nothing errors as a dependency cycle.
 8. **Re-plan, don't silently extend**, when the brief's acceptance criteria

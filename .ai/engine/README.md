@@ -19,6 +19,9 @@ python .ai/engine/ai_kit.py graph
 python .ai/engine/ai_kit.py timeline
 python .ai/engine/ai_kit.py blocked
 python .ai/engine/ai_kit.py onboard
+python .ai/engine/ai_kit.py analyze
+python .ai/engine/ai_kit.py analyze --refresh
+python .ai/engine/ai_kit.py activate .ai-work/state/control-plane-hardening.json
 python .ai/engine/ai_kit.py transition T1 start --actor planner
 python .ai/engine/ai_kit.py transition T1 complete --actor planner --detail "Plan approved"
 python .ai/engine/ai_kit.py transition T1 reject --actor qa --detail "Ceiling collision does not end game"
@@ -38,7 +41,68 @@ python .ai/engine/ai_kit.py drift T3
 python .ai/engine/ai_kit.py board --context ordering --format markdown --write
 python .ai/engine/ai_kit.py visualizer generate
 python .ai/engine/ai_kit.py architecture discover
+python .ai/engine/ai_kit.py plan-draft create download-share --title "Share downloads" --problem "Users need shareable links" --scope "API" --acceptance "A user can create a link"
+python .ai/engine/ai_kit.py plan-draft update download-share --expected-revision 1 --summary "Clarified expiry" --add-scope "Expiry policy"
+python .ai/engine/ai_kit.py plan-draft add-task download-share T1 --expected-revision 2 --title "Define share contract" --owner planner --phase plan --acceptance "Contract has expiry semantics"
+python .ai/engine/ai_kit.py plan-draft finalize download-share --expected-revision 3 --confirmed-by-user
+python .ai/engine/ai_kit.py --state .ai-work/state/download-share.json plan-draft materialize download-share --create-tasks
 ```
+
+## Collaborative plan drafts
+
+`plan-draft` is the chat-facing planning boundary. It persists a structured,
+versioned plan under `.ai-work/requirements/plans/<id>.json` plus a readable
+Markdown projection. It is intentionally **not** part of `workflow.json`:
+people and an assistant can revise the problem, scope, acceptance criteria,
+assumptions, open questions, and proposed tasks without making any work
+runnable or claiming an agent.
+
+Every mutating draft command requires `--expected-revision` after creation.
+That optimistic-concurrency check rejects a stale chat turn instead of
+silently replacing a later revision. `create` starts a `drafting` plan;
+`finalize` validates that the brief is complete, all questions are resolved,
+and its proposed task dependency graph is valid. The Planner must ask the
+user when a material detail is unclear; it must then present the resolved plan
+and obtain explicit confirmation through `--confirmed-by-user`. That answer
+does not authorize task creation: the Planner asks a second, explicit
+question, represented by `--create-tasks`. Only an explicit
+`plan-draft materialize <id> --create-tasks` may create a workflow. It writes the entire DAG
+to a previously absent `--state` file in one control-plane save, emits the
+normal task contracts/Markdown/visualizer data, and records the source draft
+revision and digest on the workflow. It never replaces an existing workflow.
+Repeating materialization for that same draft and state is an idempotent
+no-op; if a process stops after the workflow write but before the draft status
+write, repeat the command to recover the draft's `materialized` status.
+
+Use `plan-draft add-task` and `plan-draft update-task` while discussing the
+implementation. Dependencies in `--needs` name other *proposed* task IDs;
+they become the runtime DAG only at materialization. A finalized but
+unmaterialized draft can be returned to `drafting` with `plan-draft reopen`.
+A materialized plan is immutable: subsequent scope changes are a new draft
+and a deliberately new workflow/task graph, never an edit to historical chat
+intent.
+
+### Basic-edit fast path
+
+A Planner may skip the conversational draft and create one direct `add-task`
+only for a fully specified, small, low-risk edit with a clear verification
+condition. It must have no open questions or design/dependency decision and
+must not touch a public contract, auth/permissions, untrusted or sensitive
+input, schema/data, dependency, deployment, external provider, or a
+cross-cutting concern. The user request authorizes that one task; G2/G3 still
+apply. If any condition is uncertain, use the collaborative draft flow above.
+
+### Cached project context
+
+`analyze` writes a versioned project-context snapshot to
+`.ai-work/analysis/project-summary.json`. Later `analyze` calls and every
+`route T<n>` reuse it when the fingerprint matches, so normal task routing
+does not rediscover/read the full repository. The fingerprint is bounded to
+AI-Kit analyzer inputs (configuration and stack markers), Git HEAD, and the
+tracked raw working-tree diff; it refreshes after a commit, configuration edit, or
+tracked source edit. Use `analyze --refresh` when relevant untracked files
+have been added. The route response includes `project_context` and places the
+snapshot path first in its minimal `context` list.
 
 `visualizer generate` exports the current board, module architecture, context
 impact, the last 200 runtime events, and the discovered feature-module
@@ -132,7 +196,7 @@ mirroring the task's own record, `execution` identity, and an
 of embedding the task inline and referencing `tasks.md`. This is input-side
 only: the agent still self-reports completion by shelling out to `ai-kit
 transition <id> complete`, exactly as every other runner does, and the
-dispatch audit log (`.ai-work/dispatch_log_<id>.json`) records `input_mode`
+dispatch audit log (`.ai-work/dispatch/<id>.json`) records `input_mode`
 (`"json-file"` or `"prompt"`) and `handoff_file` for either case. Runners
 without `input` set keep today's `tasks.md`-referencing prompt unchanged.
 
@@ -179,6 +243,8 @@ roles:
   qa:
     runner: opencode-cli
     model: deepseek-v4-flash
+      backup_runner: codex-cli
+      backup_model: gpt-5.4
   reviewer:
     runner: opencode-cli
     model: deepseek-v4-pro
@@ -195,10 +261,9 @@ fresh `agent_id`, alongside the existing `kind`/`status`/`verdict`/`reason`
 fields (these three identity fields are optional on plain `ai-kit approve`
 too — pass `--runner`/`--model`/`--agent-id` to stamp manual approvals the
 same way). If `verify` fails, `pipeline` stops with the task left at
-`implementation-complete` rather than forcing a QA/review verdict on broken
-work — fix it and re-run `ai-kit pipeline <task-id>`. There is deliberately
-no auto-triggering scheduler and no retry/resume across phases yet: this is
-a manually-invoked, single-task chain, not a background service.
+implementation-complete` rather than forcing a QA/review verdict on broken
+work. There is deliberately no background scheduler, but an opted-in
+post-completion run can retry rejected work a bounded number of times.
 
 `ai-kit transition <task-id> complete` can optionally chain straight into
 that same verify -> QA -> review -> close sequence on its own, without a
@@ -207,6 +272,11 @@ follow-up `pipeline` call. This is opt in via `.ai-config/automation.yaml`:
 ```yaml
 post_completion:
   enabled: true
+  retry_on_rejection: true
+  max_retries: 2
+  backup_after_retries: 1
+  dispatch_ready_on_close: true
+  dispatch_ready_limit: 1
 ```
 
 Missing the `post_completion` section, `enabled: false`, or any
@@ -220,9 +290,24 @@ unfinished phase instead of re-running QA/review that already passed. A
 per-task lock file serializes concurrent triggers for the same task so two
 racing `complete` calls only ever produce one pipeline run — the loser
 observes `post_completion: "already-running"` rather than double-dispatching
-QA/review. A `verify`, QA, or review failure leaves the task at its current
-status and records a `post-completion-failed` event instead of raising past
-the caller; `complete` itself still succeeds.
+QA/review. If a runner is interrupted after acquiring the lock, the next
+pipeline run checks the recorded PID and recovers the lock only when its
+owning process no longer exists; a live owner remains non-blocking. With
+`retry_on_rejection: true`, a QA or review rejection that
+returns the task to `todo` re-dispatches the executor and runs the full chain
+again until `max_retries` is reached. The retry count is capped at five by the
+engine. After a successful close, `dispatch_ready_on_close` invokes the
+dependency-aware `dispatch-ready` command and starts up to
+`dispatch_ready_limit` runnable tasks. A verify failure or a runner that exits
+without recording a verdict still leaves the task open and records
+`post-completion-failed`; those cases require an explicit fix or pipeline
+rerun.
+
+Each QA/reviewer role may define `backup_runner` and `backup_model`. Once the
+task has exceeded `backup_after_retries` rejected implementation attempts, the
+next QA/review dispatch uses that backup identity. The backup must still be
+different from the executor and must record its own verdict; a different model
+does not grant automatic approval.
 
 Every task also records `base_commit` (git HEAD at creation),
 `context_revision` (its context's `.ai-config/contexts.yaml` revision at creation),

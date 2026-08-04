@@ -17,6 +17,11 @@ Capture WHAT the user wants before anyone plans HOW — a precise, testable brie
 ## When to use
 The first step of any new feature or non-trivial change, before `plan`/`tasks.md`. Skip only for trivial fixes per the Sizing Gate.
 
+For a clearly specified, low-risk basic edit, the Planner may use the direct
+single-task fast path instead. It is not available for any uncertainty or
+for API/auth/input/data/migration/dependency/deployment/cross-cutting work;
+when in doubt, perform this intake.
+
 ## Procedure
 1. **Restate the problem** in one sentence — the user need, not a proposed solution.
 2. **Scope**: what's in, and explicitly what's OUT (the out-of-scope list prevents creep).
@@ -24,6 +29,12 @@ The first step of any new feature or non-trivial change, before `plan`/`tasks.md
 4. **Constraints & context**: known systems, data, non-functionals (perf, security, compliance); link source material into `.ai-work/requirements/context/`.
 5. **Open questions**: list blockers first; do not invent answers — flag for the user.
 6. **Write** `.ai-work/requirements/brief.md` from `.ai/templates/feature-brief.md`; research goes in `.ai-work/requirements/research/`.
+7. **Hold for clarification**: when any material field remains unclear, ask
+   the user the smallest useful question and update the draft only after the
+   answer. Do not finalize a plan or create tasks in that turn.
+8. **Confirm twice**: present the resolved plan and obtain explicit plan
+   approval; then ask separately whether the user wants a task DAG created.
+   These are two decisions, not one inferred intent.
 
 ## Checklist
 - [ ] Problem stated as a need, not a solution

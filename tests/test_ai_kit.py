@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -259,8 +260,9 @@ class SeparationOfDutiesTests(EngineTestCase):
         different agent id must still be blocked from qa-passing its own work."""
         self.init_workflow()
         self.add_task("T1")
-        self.transition("T1", "start", actor="backend", agent_id="worker-1")
-        self.transition("T1", "complete", actor="backend")
+        claim = self.transition("T1", "start", actor="backend", agent_id="worker-1")
+        self.transition("T1", "complete", actor="backend", agent_id="worker-1",
+                        claim_id=claim["claim_id"])
         with self.assertRaises(ai_kit.EngineError):
             self.transition("T1", "qa-pass", actor="backend", agent_id="worker-2",
                              evidence=[self.qa_evidence("T1")])
@@ -1926,7 +1928,7 @@ class RunPostCompletionTests(AutomationRunnersTestCase):
         self._prepare_task_at("implementation-complete")
         lock_path = ai_kit._post_completion_lock_path("T1", str(self.state_file))
         lock_path.parent.mkdir(parents=True, exist_ok=True)
-        lock_path.write_text("999", encoding="utf-8")
+        lock_path.write_text(str(os.getpid()), encoding="utf-8")
         result = ai_kit._run_post_completion("T1", str(self.state_file))
         self.assertEqual(result, {"task": "T1", "post_completion": "already-running"})
 

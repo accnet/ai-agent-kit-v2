@@ -10,10 +10,11 @@ import os
 import json
 import re
 import shlex
+import subprocess
 import sys
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -45,6 +46,18 @@ VISUALIZER_ARTIFACT_VERSIONS = {
     "discovered-architecture.json": 1,
 }
 VISUALIZER_MANIFEST_SCHEMA_VERSION = 1
+# .ai-work/tasks/<id>.json: the self-contained "task contract" snapshot
+# written alongside tasks.md by add-task/plan (see state-schema.md's Task
+# contract files section). Bump only when its top-level shape changes.
+TASK_CONTRACT_SCHEMA_VERSION = 1
+# A plan draft is deliberately separate from workflow.json: it captures the
+# evolving result of a human/agent conversation, while workflow.json remains
+# the deterministic execution control plane.  Bump only if the draft's
+# top-level shape changes.
+PLAN_DRAFT_SCHEMA_VERSION = 1
+PLAN_DRAFT_STATUSES = {"drafting", "ready", "materialized"}
+WORKFLOW_STATE_SCHEMA_VERSION = 4
+TASK_LEASE_SECONDS = 30 * 60
 CONFIG_FILES = {
     "runners.yaml",
     "automation.yaml",
@@ -216,17 +229,44 @@ def _load_runners() -> dict:
     return _load_yaml_registry(".ai-config/runners.yaml", "runners")
 
 
+def _parse_role_enabled(value) -> bool:
+    """Interpret an automation.yaml 'enabled' scalar. Absent means True."""
+    if value is None:
+        return True
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().strip("\"'").lower()
+    if text in {"true", "yes", "1", "on"}:
+        return True
+    if text in {"false", "no", "0", "off"}:
+        return False
+    raise EngineError(f".ai-config/automation.yaml: invalid 'enabled' value {value!r}; use true/false")
+
+
 def _load_automation_roles() -> dict:
     """Load and validate the qa/reviewer role -> runner:model mapping.
 
     Format (.ai-config/automation.yaml):
       roles:
         qa:
+          enabled: true
           runner: opencode-cli
           model: deepseek-v4-flash
         reviewer:
+          enabled: false
           runner: opencode-cli
           model: deepseek-v4-pro
+    'enabled' (optional, default true) toggles whether post-completion
+    automation (`ai-kit pipeline` / the opt-in post_completion trigger)
+    auto-dispatches that role to its configured runner at all. Set it to
+    'false' to leave a task parked at the status just before that role's
+    verdict -- `implementation-complete` for qa, `qa-passed` for review --
+    instead of spawning a CLI subprocess for it. That parked state is the
+    handoff point for a human or an interactive session (not a dispatched
+    subprocess) to verify by hand via `ai-kit approve`/`transition`; see
+    `_run_post_completion`'s manual-wait branches. 'runner' is required only
+    when the role is enabled -- a disabled role may omit it, since there is
+    nothing to dispatch to.
     Deliberately does NOT define 'executor' here: runners.yaml's
     default_executor/default_model already is the single source of truth for
     "which runner/model executes a task" (used by plain `dispatch` and
@@ -238,11 +278,21 @@ def _load_automation_roles() -> dict:
     """
     roles = _load_yaml_registry(".ai-config/automation.yaml", "roles")
     for name in ("qa", "reviewer"):
-        if name not in roles or not roles[name].get("runner"):
+        if name not in roles:
             raise EngineError(
                 f".ai-config/automation.yaml is missing role '{name}'; add a 'roles.{name}.runner' "
-                f"(and optional 'model') entry naming a runner registered in .ai-config/runners.yaml"
+                f"(and optional 'model') entry naming a runner registered in .ai-config/runners.yaml, "
+                f"or 'roles.{name}.enabled: false' to verify it manually instead"
             )
+        roles[name]["enabled"] = _parse_role_enabled(roles[name].get("enabled"))
+        if roles[name]["enabled"] and not roles[name].get("runner"):
+            raise EngineError(
+                f".ai-config/automation.yaml role '{name}' is enabled but has no 'runner'; add one, "
+                f"or set 'roles.{name}.enabled: false' to verify it manually instead"
+            )
+        for backup_key in ("backup_runner", "backup_model"):
+            if backup_key in roles[name] and not isinstance(roles[name][backup_key], str):
+                raise EngineError(f".ai-config/automation.yaml: role '{name}' has invalid '{backup_key}'")
     return roles
 
 
@@ -260,6 +310,11 @@ def _load_post_completion_config() -> dict:
     if not path.exists():
         return {"enabled": False}
     enabled = False
+    retry_on_rejection = False
+    max_retries = 0
+    dispatch_ready_on_close = False
+    dispatch_ready_limit = 1
+    backup_after_retries = 1
     in_section = False
     for line in path.read_text(encoding="utf-8").splitlines():
         if line == "post_completion:":
@@ -271,7 +326,29 @@ def _load_post_completion_config() -> dict:
             match = re.match(r"^\s+enabled:\s*(\S+)", line)
             if match:
                 enabled = match.group(1).strip().strip('"\'').lower() in {"true", "yes", "1"}
-    return {"enabled": enabled}
+            match = re.match(r"^\s+retry_on_rejection:\s*(\S+)", line)
+            if match:
+                retry_on_rejection = match.group(1).strip().strip('"\'').lower() in {"true", "yes", "1"}
+            match = re.match(r"^\s+max_retries:\s*(\d+)", line)
+            if match:
+                max_retries = min(5, max(0, int(match.group(1))))
+            match = re.match(r"^\s+dispatch_ready_on_close:\s*(\S+)", line)
+            if match:
+                dispatch_ready_on_close = match.group(1).strip().strip('"\'').lower() in {"true", "yes", "1"}
+            match = re.match(r"^\s+dispatch_ready_limit:\s*(\d+)", line)
+            if match:
+                dispatch_ready_limit = min(50, max(1, int(match.group(1))))
+            match = re.match(r"^\s+backup_after_retries:\s*(\d+)", line)
+            if match:
+                backup_after_retries = min(5, max(1, int(match.group(1))))
+    return {
+        "enabled": enabled,
+        "retry_on_rejection": retry_on_rejection,
+        "max_retries": max_retries if retry_on_rejection else 0,
+        "dispatch_ready_on_close": dispatch_ready_on_close,
+        "dispatch_ready_limit": dispatch_ready_limit,
+        "backup_after_retries": backup_after_retries,
+    }
 
 
 def _post_completion_enabled() -> bool:
@@ -566,6 +643,7 @@ def _load_rules() -> dict:
         "no_secrets_in_commits": True,    # G4 - prevent secret commits
         "destructive_operations_require_approval": True,  # G5 - require explicit approval
         "module_boundary": False,     # G6 - task files must stay inside its declared context path (opt-in)
+        "file_conflict_check": True,  # G7 - block starting a task whose files overlap an active task outside its needs graph
     }
     rules_path = _config_path("rules.yaml")
     if not rules_path.exists():
@@ -617,6 +695,7 @@ CORE_BY_ROLE = {
 }
 TRANSITIONS = {
     "start": ({"todo"}, "in-progress"),
+    "reclaim": ({"in-progress"}, "in-progress"),
     "complete": ({"in-progress"}, "implementation-complete"),
     "qa-pass": ({"implementation-complete"}, "qa-passed"),
     "review-approve": ({"qa-passed"}, "review-approved"),
@@ -643,6 +722,19 @@ def now() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
+def _lease_expiry() -> str:
+    return (datetime.now(timezone.utc) + timedelta(seconds=TASK_LEASE_SECONDS)).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def _lease_is_expired(value: str | None) -> bool:
+    if not value:
+        return True
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")) <= datetime.now(timezone.utc)
+    except ValueError:
+        return True
+
+
 def state_path(value: str | None) -> Path:
     return Path(value).resolve() if value else STATE
 
@@ -650,6 +742,17 @@ def state_path(value: str | None) -> Path:
 def workspace(path: Path) -> Path:
     """Derive a workspace from state/<workflow>.json or a standalone state file."""
     return path.parent.parent if path.parent.name == "state" else path.parent / path.stem
+
+
+def _dispatch_audit_path(state_file: Path, task_id: str, role: str | None = None) -> Path:
+    """Canonical location for structured dispatch audit metadata.
+
+    Runner stdout/stderr belongs in ``logs/``; this JSON records the command,
+    runner identity, handoff, and exit code, so it lives in the separate
+    workspace ``dispatch/`` collection instead of cluttering its root.
+    """
+    name = f"{role}_{task_id}" if role else task_id
+    return workspace(state_file) / "dispatch" / f"{name}.json"
 
 
 def display_path(path: Path) -> str:
@@ -668,7 +771,7 @@ def workflow_names() -> set[str]:
 
 
 def new_state(title: str, workflow: str) -> dict:
-    return {"version": 2, "revision": 0, "title": title, "workflow": workflow, "created_at": now(), "tasks": [], "phases": [], "events": []}
+    return {"version": WORKFLOW_STATE_SCHEMA_VERSION, "workflow_id": uuid.uuid4().hex, "revision": 0, "title": title, "workflow": workflow, "created_at": now(), "tasks": [], "phases": [], "events": []}
 
 
 def configured_stack() -> set[str]:
@@ -799,7 +902,6 @@ def _load_skill_triggers() -> dict[str, dict]:
 def _task_text(task: dict) -> str:
     parts = [task.get("title") or ""]
     parts.extend(task.get("tags") or [])
-    parts.extend(task.get("files") or [])
     parts.extend(task.get("acceptance") or [])
     return " ".join(str(part) for part in parts).lower()
 
@@ -807,7 +909,7 @@ def _task_text(task: dict) -> str:
 def _tokenize_task(task: dict) -> set[str]:
     tokens: set[str] = set(configured_stack())
     tokens.update(str(tag).lower() for tag in (task.get("tags") or []))
-    for value in [task.get("title") or "", " ".join(task.get("files") or [])]:
+    for value in [task.get("title") or "", " ".join(task.get("acceptance") or [])]:
         for token in re.findall(r"[a-z0-9][a-z0-9_-]{1,}", value.lower()):
             tokens.add(token)
     return tokens
@@ -862,7 +964,12 @@ def save(state: dict, path: Path, expected_revision: int | None = None) -> None:
         disk_revision = None
         if path.exists():
             disk_revision = json.loads(path.read_text(encoding="utf-8")).get("revision", 0)
-        if expected_revision is not None and disk_revision != expected_revision:
+        # ``-1`` is an explicit create-only precondition.  It is used by
+        # draft creation/materialization so a race can never overwrite an
+        # already-created plan or workflow state.
+        if expected_revision == -1 and disk_revision is not None:
+            raise EngineError(f"state already exists: {path}")
+        if expected_revision not in {None, -1} and disk_revision != expected_revision:
             raise EngineError(f"state changed concurrently (expected revision {expected_revision}, found {disk_revision})")
         state["revision"] = (disk_revision or 0) + 1
         temporary = path.with_suffix(path.suffix + ".tmp")
@@ -872,7 +979,7 @@ def save(state: dict, path: Path, expected_revision: int | None = None) -> None:
         lock.unlink(missing_ok=True)
     if path == STATE:
         active = [task["id"] for task in state["tasks"] if task["status"] == "in-progress"]
-        summary = {"version": 1, "workflow_state": display_path(path), "title": state["title"], "workflow": state["workflow"], "active_tasks": active, "updated_at": now()}
+        summary = {"version": 1, "workflow_state": display_path(path), "workflow_id": state.get("workflow_id"), "title": state["title"], "workflow": state["workflow"], "active_tasks": active, "updated_at": now()}
         CURRENT.write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
 
 
@@ -885,6 +992,7 @@ def validate(state: dict) -> None:
     missing = required - set(state)
     if missing:
         raise EngineError(f"state missing keys: {', '.join(sorted(missing))}")
+    state.setdefault("workflow_id", uuid.uuid5(uuid.NAMESPACE_URL, f"ai-kit:{state.get('title')}:{state.get('created_at', '')}").hex)
     # Migrate older tasks that lack claimed_by, context, epic, or provenance fields
     for task in state.get("tasks", []):
         if "claimed_by" not in task:
@@ -898,6 +1006,10 @@ def validate(state: dict) -> None:
         task.setdefault("contract_hashes", {})
         task.setdefault("upstream_context_revisions", {})
         task.setdefault("superseded_by", None)
+        task.setdefault("contract_revision", None)
+        task.setdefault("contract_hash", None)
+        task.setdefault("claim_id", None)
+        task.setdefault("claim_expires_at", None)
     missing = set()  # reset after migration
     if missing:
         raise EngineError(f"state missing keys: {', '.join(sorted(missing))}")
@@ -1058,6 +1170,50 @@ def runnable(task: dict, tasks: dict) -> bool:
     return task["status"] == "todo" and all(tasks[dep]["status"] in DEPENDENCY_SATISFYING_STATUSES for dep in task["needs"])
 
 
+def _transitive_needs(task_id: str, tasks: dict) -> set[str]:
+    """All task ids `task_id` (transitively) needs -- its full upstream dependency set."""
+    seen: set[str] = set()
+    stack = list(tasks.get(task_id, {}).get("needs", []))
+    while stack:
+        dep = stack.pop()
+        if dep in seen or dep not in tasks:
+            continue
+        seen.add(dep)
+        stack.extend(tasks[dep].get("needs", []))
+    return seen
+
+
+def _file_conflicts(task: dict, state: dict) -> list[dict]:
+    """Other non-terminal tasks whose `files` overlap `task`'s files with no
+    needs relationship (in either direction) connecting the two.
+
+    A declared `needs` edge already orders two tasks safely (G1 blocks the
+    dependent from starting first); this only flags the case `needs` does
+    NOT cover -- two tasks that touch the same file(s) with no ordering
+    between them at all, which is exactly what lets two agents (or two
+    dispatch calls) race on the same file. Declaring `needs` when adding a
+    task is the fix; this is the safety net for when that declaration is
+    missing or wrong, e.g. a task added by a different agent/process that
+    didn't know about the overlap.
+    """
+    task_files = set(task.get("files") or [])
+    if not task_files:
+        return []
+    tasks = task_map(state)
+    upstream = _transitive_needs(task["id"], tasks)
+    conflicts = []
+    for other in state["tasks"]:
+        if other["id"] == task["id"] or other["status"] != "in-progress":
+            continue
+        overlap = task_files & set(other.get("files") or [])
+        if not overlap:
+            continue
+        if other["id"] in upstream or task["id"] in _transitive_needs(other["id"], tasks):
+            continue
+        conflicts.append({"task": other["id"], "status": other["status"], "files": sorted(overlap)})
+    return conflicts
+
+
 def validate_evidence(task: dict, action: str, paths: list[str]) -> None:
     expected_kind = "qa" if action == "qa-pass" else "review"
     for item in paths:
@@ -1206,7 +1362,7 @@ def _generate_visualizer_data(state_arg: str | Path | None = None) -> dict:
     validate(state)
     board = {status: [] for status in STATUSES}
     for task in state["tasks"]:
-        entry = _board_entry(task)
+        entry = _board_entry(task, state_path_value)
         entry["tags"] = task.get("tags", [])
         entry["files"] = task.get("files", [])
         entry["acceptance_count"] = len(task.get("acceptance", []))
@@ -1264,6 +1420,110 @@ def cmd_init(args: argparse.Namespace) -> dict:
     return state
 
 
+def _task_contract_dict(task: dict, revision: int, created_at: str, updated_at: str) -> dict:
+    """Build the definitional snapshot for a task's contract file.
+
+    Deliberately scoped to the fields a runner needs to know WHAT the task
+    is (title, ownership, dependencies, acceptance) -- not lifecycle state
+    (status, attempts, claimed_by, evidence), which stays exclusively in
+    workflow.json. See AGENTS.md's Task Contract model / state-schema.md's
+    "Task contract files" section for the ownership split.
+    """
+    return {
+        "schema_version": TASK_CONTRACT_SCHEMA_VERSION,
+        "task_id": task["id"],
+        "revision": revision,
+        "title": task["title"],
+        "owner": task["owner"],
+        "phase": task["phase"],
+        "needs": task["needs"],
+        "depends_on": task.get("depends_on", []),
+        "acceptance": task["acceptance"],
+        "files": task["files"],
+        "tags": task.get("tags", []),
+        "context": task.get("context"),
+        "epic": task.get("epic"),
+        "base_commit": task.get("base_commit"),
+        "created_at": created_at,
+        "updated_at": updated_at,
+    }
+
+
+def _task_contract_payload(contract: dict) -> bytes:
+    return (json.dumps(contract, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
+
+
+def _build_task_contract(task: dict, revision: int, created_at: str, updated_at: str | None = None) -> tuple[bytes, str]:
+    """Build a contract's on-disk bytes and content hash without writing anything.
+
+    Split from the write step so a caller can compute the hash to store in
+    workflow.json's task record *before* committing to that state -- and
+    write both in a way where the recorded hash always matches exactly what
+    lands on disk, since both come from this one serialization.
+    """
+    contract = _task_contract_dict(task, revision, created_at, updated_at or created_at)
+    payload = _task_contract_payload(contract)
+    return payload, hashlib.sha256(payload).hexdigest()
+
+
+def _write_contract_payload(payload: bytes, task_id: str, state_file: Path) -> Path:
+    contract_path = workspace(state_file) / "tasks" / f"{task_id}.json"
+    contract_path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = contract_path.with_suffix(contract_path.suffix + ".tmp")
+    temporary.write_bytes(payload)
+    os.replace(temporary, contract_path)
+    return contract_path
+
+
+def _existing_contract_created_at(task_id: str, state_file: Path) -> str | None:
+    """Read the original created_at off an existing contract file, if any.
+
+    update-task needs this so bumping a contract's revision preserves its
+    original creation timestamp instead of resetting it on every edit; a
+    missing or unreadable file (task predates contract tracking, or was
+    deleted) is not an error here -- the caller treats it as "no prior
+    contract" and stamps a fresh created_at.
+    """
+    contract_path = workspace(state_file) / "tasks" / f"{task_id}.json"
+    if not contract_path.exists():
+        return None
+    try:
+        return json.loads(contract_path.read_text(encoding="utf-8")).get("created_at")
+    except (json.JSONDecodeError, OSError):
+        return None
+
+
+def _resolve_task_definition(task_id: str, state: dict, state_file: Path) -> dict:
+    """Return the task dict routing/dispatch/pipeline should read.
+
+    Prefers the contract file's (.ai-work/tasks/<id>.json) definitional
+    fields -- title, owner, phase, needs, depends_on, acceptance, files,
+    tags, context, epic, base_commit -- over workflow.json's copy of the
+    same fields when a contract exists, per state-schema.md's Task contract
+    files split. Lifecycle fields (status, attempts, claimed_by, evidence,
+    blocked_reason) always come from workflow.json regardless, since the
+    contract file never carries them. Falls back to the workflow.json task
+    unchanged when no contract file exists yet, so this cannot break tasks
+    created before contract files existed (see the migration gap noted in
+    state-schema.md).
+    """
+    task = task_map(state).get(task_id)
+    if not task:
+        raise EngineError(f"unknown task: {task_id}")
+    contract_path = workspace(state_file) / "tasks" / f"{task_id}.json"
+    if not contract_path.exists():
+        return task
+    try:
+        contract = json.loads(contract_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise EngineError(f"invalid task contract JSON: {display_path(contract_path)}: {exc}") from exc
+    merged = dict(task)
+    for field in ("title", "owner", "phase", "needs", "depends_on", "acceptance", "files", "tags", "context", "epic", "base_commit"):
+        if field in contract:
+            merged[field] = contract[field]
+    return merged
+
+
 def cmd_add_task(args: argparse.Namespace) -> dict:
     path, state = state_path(args.state), load(state_path(args.state))
     task_ids = task_map(state)
@@ -1276,13 +1536,18 @@ def cmd_add_task(args: argparse.Namespace) -> dict:
     context_revision = _context_revision(context)
     epic = getattr(args, "epic", None)
     depends_on = args.depends_on or []
-    task = {"id": args.id, "title": args.title, "owner": args.owner, "phase": args.phase, "needs": args.needs or [], "status": "todo", "acceptance": acceptance, "files": args.files or [], "tags": args.tags or [], "attempts": 0, "evidence": [], "blocked_reason": None, "claimed_by": None, "context": context, "epic": epic, "base_commit": _git_head(), "context_revision": context_revision, "epic_revision": _epic_revision(epic), "upstream_context_revisions": _upstream_context_revisions(context), "depends_on": depends_on, "contract_hashes": _contract_hashes(depends_on)}
+    task = {"id": args.id, "title": args.title, "owner": args.owner, "phase": args.phase, "needs": args.needs or [], "status": "todo", "acceptance": acceptance, "files": args.files or [], "tags": args.tags or [], "attempts": 0, "evidence": [], "blocked_reason": None, "claimed_by": None, "context": context, "epic": epic, "base_commit": _git_head(), "context_revision": context_revision, "epic_revision": _epic_revision(epic), "upstream_context_revisions": _upstream_context_revisions(context), "depends_on": depends_on, "contract_hashes": _contract_hashes(depends_on), "contract_revision": None, "contract_hash": None}
+    timestamp = now()
+    contract_payload, contract_hash = _build_task_contract(task, 1, timestamp)
+    task["contract_revision"] = 1
+    task["contract_hash"] = contract_hash
     state["tasks"].append(task)
     validate(state)
     sync_phases(state)
     sync_tasks_md(state, path)
     event(state, path, "add-task", task, args.actor, None, "todo", "task added")
     save(state, path, state["revision"])
+    _write_contract_payload(contract_payload, task["id"], path)
     _auto_generate_visualizer_data(path)
     return task
 
@@ -1305,10 +1570,21 @@ def cmd_update_task(args: argparse.Namespace) -> dict:
     if args.add_tags:
         task["tags"].extend(t for t in args.add_tags if t not in task["tags"])
         detail_parts.append("tags: " + ", ".join(args.add_tags))
+    # Contract fields (acceptance/files/tags) just changed, so the contract
+    # file is stale the instant this returns unless it's rewritten here too
+    # -- bump its revision, preserve its original created_at, and record the
+    # new hash in workflow.json so drift/board can detect a hand-edited or
+    # otherwise out-of-sync contract file later (see _task_contract_drift).
+    next_revision = (task.get("contract_revision") or 0) + 1
+    created_at = _existing_contract_created_at(task["id"], path) or now()
+    contract_payload, contract_hash = _build_task_contract(task, next_revision, created_at, now())
+    task["contract_revision"] = next_revision
+    task["contract_hash"] = contract_hash
     sync_phases(state)
     sync_tasks_md(state, path)
     event(state, path, "update-task", task, args.actor, task["status"], task["status"], " | ".join(detail_parts))
     save(state, path, state["revision"])
+    _write_contract_payload(contract_payload, task["id"], path)
     _auto_generate_visualizer_data(path)
     return task
 
@@ -1334,6 +1610,21 @@ def cmd_transition(args: argparse.Namespace) -> dict:
         raise EngineError(f"cannot {args.action} {args.id} from {task['status']}")
     if args.action == "start" and not runnable(task, task_map(state)):
         raise EngineError(f"task {args.id} is blocked by unfinished dependencies")
+    if args.action == "reclaim":
+        if not _lease_is_expired(task.get("claim_expires_at")):
+            raise EngineError(f"task {args.id} is still leased to {task.get('claimed_by')}; reclaim only after expiry")
+        if not getattr(args, "agent_id", None):
+            raise EngineError("reclaim requires --agent-id")
+    if args.action == "start" and _load_rules().get("file_conflict_check", True):
+        conflicts = _file_conflicts(task, state)
+        if conflicts:
+            described = "; ".join(f"{c['task']} ({c['status']}, files: {', '.join(c['files'])})" for c in conflicts)
+            raise EngineError(
+                f"G7 file_conflict_check: task {task['id']} shares files with active task(s) not "
+                f"reachable via needs in either direction: {described}. Declare a needs dependency "
+                f"between them, wait for the other task to finish, or set 'file_conflict_check: false' "
+                f"in .ai-config/rules.yaml to disable this gate"
+            )
     if args.action in {"block", "reject", "supersede", "cancel"} and not args.detail:
         raise EngineError(f"{args.action} requires --detail")
     if args.action == "supersede":
@@ -1351,6 +1642,15 @@ def cmd_transition(args: argparse.Namespace) -> dict:
         claimed_role = task["claimed_by"].split("#", 1)[0] if task.get("claimed_by") else None
         if claimed_role and args.actor == claimed_role:
             raise EngineError(f"{args.action} actor '{args.actor}' must differ from executor '{task['claimed_by']}'")
+    if args.action in {"complete", "block"} and task.get("claim_id"):
+        claim_id = getattr(args, "claim_id", None)
+        agent_id = getattr(args, "agent_id", None)
+        expected_agent = (task.get("claimed_by") or "").partition("#")[2]
+        if claim_id != task["claim_id"] or not agent_id or agent_id != expected_agent:
+            raise EngineError(
+                f"{args.action} requires the active --claim-id and --agent-id for task {args.id}; "
+                "use reclaim after the lease expires"
+            )
     if args.action in {"qa-pass", "review-approve"}:
         if not args.evidence:
             raise EngineError(f"{args.action} requires at least one --evidence path")
@@ -1358,16 +1658,26 @@ def cmd_transition(args: argparse.Namespace) -> dict:
     old = task["status"]; task["status"] = target
     if args.action in {"block", "reject", "supersede", "cancel"}:
         task["blocked_reason"] = args.detail
-    elif args.action in {"start", "unblock"}:
+    elif args.action in {"start", "reclaim", "unblock"}:
         task["blocked_reason"] = None
     if args.action == "supersede":
         task["superseded_by"] = getattr(args, "by", None)
     if args.evidence:
         task["evidence"].extend(args.evidence)
-    if args.action == "start":
+    if args.action in {"start", "reclaim"}:
         task["attempts"] += 1
         agent_id = getattr(args, "agent_id", None)
-        task["claimed_by"] = f"{args.actor}#{agent_id}" if agent_id else args.actor
+        # Explicit agent dispatches receive an enforceable lease. Preserve the
+        # pre-v4 manual CLI path for existing operators/tests that intentionally
+        # start work without an agent instance; dispatch always supplies one.
+        if agent_id:
+            task["claimed_by"] = f"{args.actor}#{agent_id}"
+            task["claim_id"] = uuid.uuid4().hex
+            task["claim_expires_at"] = _lease_expiry()
+        else:
+            task["claimed_by"] = args.actor
+            task["claim_id"] = None
+            task["claim_expires_at"] = None
     sync_phases(state)
     sync_tasks_md(state, path)
     event(state, path, args.action, task, args.actor, old, target, args.detail or "")
@@ -1427,8 +1737,15 @@ def cmd_plan(args: argparse.Namespace) -> dict:
     depends_on = args.depends_on or []
     contract_hashes = _contract_hashes(depends_on)
     acceptance = _flatten_repeated(args.acceptance)
-    plan_task = {"id": "T1", "title": "Confirm scope and plan: " + args.idea, "owner": "planner", "phase": "plan", "needs": [], "status": "todo", "acceptance": ["Scope, exclusions, risks, and acceptance criteria confirmed"], "files": [".ai-work/roadmap/roadmap.md", ".ai-work/plan/plan.md", ".ai-work/tasks/tasks.md"], "tags": ["planning"], "attempts": 0, "evidence": [], "blocked_reason": None, "claimed_by": None, "base_commit": base_commit, "context_revision": None, "epic_revision": None, "depends_on": [], "contract_hashes": {}}
-    build_task = {"id": "T2", "title": args.idea, "owner": args.owner, "phase": args.phase, "needs": ["T1"], "status": "todo", "acceptance": acceptance, "files": args.files or [], "tags": args.tags or [], "attempts": 0, "evidence": [], "blocked_reason": None, "claimed_by": None, "context": context, "epic": epic, "base_commit": base_commit, "context_revision": _context_revision(context), "epic_revision": _epic_revision(epic), "upstream_context_revisions": _upstream_context_revisions(context), "depends_on": depends_on, "contract_hashes": contract_hashes}
+    plan_task = {"id": "T1", "title": "Confirm scope and plan: " + args.idea, "owner": "planner", "phase": "plan", "needs": [], "status": "todo", "acceptance": ["Scope, exclusions, risks, and acceptance criteria confirmed"], "files": [".ai-work/roadmap/roadmap.md", ".ai-work/plan/plan.md", ".ai-work/tasks/tasks.md"], "tags": ["planning"], "attempts": 0, "evidence": [], "blocked_reason": None, "claimed_by": None, "base_commit": base_commit, "context_revision": None, "epic_revision": None, "depends_on": [], "contract_hashes": {}, "contract_revision": None, "contract_hash": None}
+    build_task = {"id": "T2", "title": args.idea, "owner": args.owner, "phase": args.phase, "needs": ["T1"], "status": "todo", "acceptance": acceptance, "files": args.files or [], "tags": args.tags or [], "attempts": 0, "evidence": [], "blocked_reason": None, "claimed_by": None, "context": context, "epic": epic, "base_commit": base_commit, "context_revision": _context_revision(context), "epic_revision": _epic_revision(epic), "upstream_context_revisions": _upstream_context_revisions(context), "depends_on": depends_on, "contract_hashes": contract_hashes, "contract_revision": None, "contract_hash": None}
+    timestamp = now()
+    plan_payload, plan_hash = _build_task_contract(plan_task, 1, timestamp)
+    plan_task["contract_revision"] = 1
+    plan_task["contract_hash"] = plan_hash
+    build_payload, build_hash = _build_task_contract(build_task, 1, timestamp)
+    build_task["contract_revision"] = 1
+    build_task["contract_hash"] = build_hash
     state["tasks"] = [plan_task, build_task]; validate(state); sync_phases(state)
     root = workspace(path)
     root.joinpath("roadmap").mkdir(parents=True, exist_ok=True); root.joinpath("plan").mkdir(parents=True, exist_ok=True); root.joinpath("tasks").mkdir(parents=True, exist_ok=True)
@@ -1437,15 +1754,428 @@ def cmd_plan(args: argparse.Namespace) -> dict:
     sync_tasks_md(state, path)
     event(state, path, "plan", None, args.actor, None, None, "idea converted to draft plan")
     save(state, path)
+    _write_contract_payload(plan_payload, "T1", path)
+    _write_contract_payload(build_payload, "T2", path)
     _auto_generate_visualizer_data(path)
     return {"state": display_path(path), "workspace": display_path(root), "tasks": ["T1", "T2"], "assumptions": args.assumptions or "none recorded"}
 
 
-def cmd_route(args: argparse.Namespace) -> dict:
-    state = load(state_path(args.state)); validate(state)
-    task = task_map(state).get(args.id)
+def _plan_draft_path(plan_id: str) -> Path:
+    """Return a safe, deterministic location for a collaborative plan draft."""
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", plan_id):
+        raise EngineError("plan draft id must contain only letters, digits, '.', '_' or '-' and cannot start with punctuation")
+    # The override keeps subprocess tests fully isolated from the repository's
+    # disposable .ai-work state. Production callers use the default path.
+    root = Path(os.environ["AI_KIT_PLAN_DRAFT_DIR"]).resolve() if os.environ.get("AI_KIT_PLAN_DRAFT_DIR") else WORK / "requirements" / "plans"
+    return root / f"{plan_id}.json"
+
+
+def _draft_event(draft: dict, action: str, actor: str, detail: str) -> None:
+    draft.setdefault("history", []).append({"ts": now(), "action": action, "actor": actor, "detail": detail})
+
+
+def _validate_plan_draft_shape(draft: dict, path: Path) -> None:
+    required = {"schema_version", "id", "title", "workflow", "status", "revision", "brief", "tasks", "history", "materialization"}
+    missing = required - set(draft)
+    if missing:
+        raise EngineError(f"plan draft {display_path(path)} missing keys: {', '.join(sorted(missing))}")
+    if draft["schema_version"] != PLAN_DRAFT_SCHEMA_VERSION:
+        raise EngineError(
+            f"plan draft {display_path(path)} uses unsupported schema_version {draft['schema_version']} "
+            f"(expected {PLAN_DRAFT_SCHEMA_VERSION})"
+        )
+    if draft["status"] not in PLAN_DRAFT_STATUSES:
+        raise EngineError(f"plan draft {draft['id']} has invalid status {draft['status']!r}")
+    if draft["workflow"] not in workflow_names():
+        raise EngineError(f"plan draft {draft['id']} has unknown workflow {draft['workflow']!r}")
+    if not isinstance(draft["brief"], dict) or not isinstance(draft["tasks"], list) or not isinstance(draft["history"], list):
+        raise EngineError(f"plan draft {draft['id']} has invalid brief, tasks, or history shape")
+
+
+def _load_plan_draft(plan_id: str) -> tuple[Path, dict]:
+    path = _plan_draft_path(plan_id)
+    if not path.exists():
+        raise EngineError(f"plan draft not found: {display_path(path)}; run 'plan-draft create {plan_id}' first")
+    draft = load(path)
+    _validate_plan_draft_shape(draft, path)
+    return path, draft
+
+
+def _write_plan_draft_markdown(draft: dict) -> Path:
+    """Write the human-facing projection; JSON remains the authoritative draft."""
+    path = _plan_draft_path(draft["id"]).with_suffix(".md")
+    brief = draft["brief"]
+    lines = [
+        f"# Plan draft: {draft['title']}",
+        "",
+        f"- ID: `{draft['id']}`",
+        f"- Revision: {draft['revision']}",
+        f"- Status: {draft['status']}",
+        f"- Workflow: {draft['workflow']}",
+        "",
+        "## Problem",
+        "",
+        brief.get("problem") or "Not recorded.",
+        "",
+        "## Scope",
+        "",
+    ]
+    for key, heading in (("scope", "Scope"), ("out_of_scope", "Out of scope"), ("acceptance", "Acceptance criteria"), ("assumptions", "Assumptions"), ("open_questions", "Open questions")):
+        if key != "scope":
+            lines.extend([f"## {heading}", ""])
+        values = brief.get(key) or []
+        lines.extend([f"- {value}" for value in values] or ["- None recorded."])
+        lines.append("")
+    lines.extend(["## Proposed tasks", ""])
+    for task in draft["tasks"]:
+        needs = f"; needs: {', '.join(task['needs'])}" if task.get("needs") else ""
+        lines.append(f"- `{task['id']}` — {task['title']} (owner: {task['owner']}; phase: {task['phase']}{needs})")
+        lines.extend([f"  - Accept: {criterion}" for criterion in task.get("acceptance", [])])
+    if not draft["tasks"]:
+        lines.append("- No tasks proposed yet.")
+    lines.append("")
+    if draft.get("materialization"):
+        materialization = draft["materialization"]
+        lines.extend(["## Materialization", "", f"- State: `{materialization['state']}`", f"- Source revision: {materialization['source_revision']}", ""])
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(".md.tmp")
+    temporary.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    os.replace(temporary, path)
+    return path
+
+
+def _save_plan_draft(draft: dict, path: Path, expected_revision: int | None) -> None:
+    draft["updated_at"] = now()
+    save(draft, path, expected_revision)
+    _write_plan_draft_markdown(draft)
+
+
+def _assert_draft_editable(draft: dict) -> None:
+    if draft["status"] != "drafting":
+        raise EngineError(
+            f"plan draft {draft['id']} is {draft['status']}; reopen it before changing the proposed plan"
+        )
+
+
+def _draft_task_index(draft: dict) -> dict[str, dict]:
+    for task in draft["tasks"]:
+        task_id = task.get("id")
+        if not isinstance(task_id, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", task_id):
+            raise EngineError(f"plan draft {draft['id']} has unsafe proposed task id {task_id!r}")
+    tasks = {task.get("id"): task for task in draft["tasks"]}
+    if None in tasks or len(tasks) != len(draft["tasks"]):
+        raise EngineError(f"plan draft {draft['id']} has duplicate or missing proposed task ids")
+    return tasks
+
+
+def _draft_task_from_args(args: argparse.Namespace) -> dict:
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", args.task_id):
+        raise EngineError("plan draft task id must contain only letters, digits, '.', '_' or '-' and cannot start with punctuation")
+    acceptance = _flatten_repeated(args.acceptance)
+    if not acceptance:
+        raise EngineError("plan-draft add-task requires at least one --acceptance criterion")
+    return {
+        "id": args.task_id,
+        "title": args.title,
+        "owner": args.owner,
+        "phase": args.phase,
+        "needs": args.needs or [],
+        "acceptance": acceptance,
+        "files": args.files or [],
+        "tags": args.tags or [],
+        "context": args.context,
+        "epic": args.epic,
+        "depends_on": args.depends_on or [],
+    }
+
+
+def _draft_to_runtime_task(task: dict, base_commit: str | None) -> tuple[dict, bytes]:
+    context = task.get("context")
+    depends_on = task.get("depends_on") or []
+    runtime = {
+        "id": task["id"], "title": task["title"], "owner": task["owner"], "phase": task["phase"],
+        "needs": task.get("needs") or [], "status": "todo", "acceptance": task["acceptance"],
+        "files": task.get("files") or [], "tags": task.get("tags") or [], "attempts": 0,
+        "evidence": [], "blocked_reason": None, "claimed_by": None, "context": context,
+        "epic": task.get("epic"), "base_commit": base_commit,
+        "context_revision": _context_revision(context), "epic_revision": _epic_revision(task.get("epic")),
+        "upstream_context_revisions": _upstream_context_revisions(context), "depends_on": depends_on,
+        "contract_hashes": _contract_hashes(depends_on), "contract_revision": None, "contract_hash": None,
+        "superseded_by": None,
+    }
+    payload, contract_hash = _build_task_contract(runtime, 1, now())
+    runtime["contract_revision"] = 1
+    runtime["contract_hash"] = contract_hash
+    return runtime, payload
+
+
+def _validate_draft_ready(draft: dict) -> None:
+    brief = draft["brief"]
+    errors = []
+    if not str(draft.get("title") or "").strip():
+        errors.append("title is required")
+    if not str(brief.get("problem") or "").strip():
+        errors.append("brief.problem is required")
+    if not brief.get("scope"):
+        errors.append("brief.scope needs at least one item")
+    if not brief.get("acceptance"):
+        errors.append("brief.acceptance needs at least one criterion")
+    if brief.get("open_questions"):
+        errors.append("all open questions must be resolved before finalizing")
+    if not draft["tasks"]:
+        errors.append("at least one proposed task is required")
+    try:
+        tasks = _draft_task_index(draft)
+    except EngineError as exc:
+        errors.append(str(exc))
+        tasks = {}
+    contexts = _load_contexts()
+    for task_id, task in tasks.items():
+        for key in ("title", "owner", "phase", "acceptance", "needs", "files", "tags", "depends_on"):
+            if key not in task:
+                errors.append(f"task {task_id} missing {key}")
+        if task.get("owner") not in role_names():
+            errors.append(f"task {task_id} has unknown owner {task.get('owner')!r}")
+        if not str(task.get("title") or "").strip() or not str(task.get("phase") or "").strip():
+            errors.append(f"task {task_id} needs title and phase")
+        if not task.get("acceptance"):
+            errors.append(f"task {task_id} needs acceptance criteria")
+        unknown_needs = set(task.get("needs") or []) - set(tasks)
+        if unknown_needs:
+            errors.append(f"task {task_id} has unknown dependencies: {', '.join(sorted(unknown_needs))}")
+        if task_id in (task.get("needs") or []):
+            errors.append(f"task {task_id} cannot depend on itself")
+        if task.get("context") and task["context"] not in contexts:
+            errors.append(f"task {task_id} has unregistered context {task['context']!r}")
+    if not errors:
+        candidate = new_state(draft["title"], draft["workflow"])
+        try:
+            candidate["tasks"] = [_draft_to_runtime_task(task, None)[0] for task in draft["tasks"]]
+            validate(candidate)
+        except EngineError as exc:
+            errors.append(str(exc))
+    if errors:
+        raise EngineError("plan draft is not ready: " + "; ".join(errors))
+
+
+def _draft_digest(draft: dict) -> str:
+    """Digest the plan definition, excluding mutable audit/materialization metadata."""
+    definition = {
+        "schema_version": draft["schema_version"], "id": draft["id"], "title": draft["title"],
+        "workflow": draft["workflow"], "brief": draft["brief"], "tasks": draft["tasks"],
+    }
+    encoded = json.dumps(definition, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _matching_materialized_state(path: Path, draft: dict) -> bool:
+    if not path.exists():
+        return False
+    try:
+        state = load(path)
+        validate(state)
+    except EngineError:
+        return False
+    source = state.get("source_plan") or {}
+    materialization = draft.get("materialization") or {}
+    expected_ids = [task["id"] for task in draft["tasks"]]
+    return (
+        source.get("id") == draft["id"]
+        and source.get("revision") == materialization.get("source_revision")
+        and source.get("digest") == materialization.get("digest")
+        and [task["id"] for task in state["tasks"]] == expected_ids
+    )
+
+
+def cmd_plan_draft_create(args: argparse.Namespace) -> dict:
+    path = _plan_draft_path(args.id)
+    if path.exists():
+        raise EngineError(f"plan draft already exists: {display_path(path)}")
+    if args.workflow not in workflow_names():
+        raise EngineError(f"unknown workflow: {args.workflow}")
+    draft = {
+        "schema_version": PLAN_DRAFT_SCHEMA_VERSION, "id": args.id, "title": args.title,
+        "workflow": args.workflow, "status": "drafting", "revision": 0, "created_at": now(),
+        "updated_at": now(),
+        "brief": {
+            "problem": args.problem, "scope": args.scope or [], "out_of_scope": args.out_of_scope or [],
+            "acceptance": _flatten_repeated(args.acceptance), "assumptions": args.assumption or [],
+            "open_questions": args.open_question or [],
+        },
+        "tasks": [], "history": [], "materialization": None,
+    }
+    _draft_event(draft, "create", args.actor, "draft created from conversation")
+    _save_plan_draft(draft, path, -1)
+    return {"draft": display_path(path), "markdown": display_path(path.with_suffix('.md')), "revision": draft["revision"], "status": draft["status"]}
+
+
+def cmd_plan_draft_update(args: argparse.Namespace) -> dict:
+    path, draft = _load_plan_draft(args.id)
+    _assert_draft_editable(draft)
+    if args.expected_revision != draft["revision"]:
+        raise EngineError(f"stale plan draft revision: expected {args.expected_revision}, found {draft['revision']}")
+    brief = draft["brief"]
+    changes = []
+    if args.title:
+        draft["title"] = args.title; changes.append("title")
+    if args.problem:
+        brief["problem"] = args.problem; changes.append("problem")
+    for key, value in (("scope", args.set_scope), ("out_of_scope", args.set_out_of_scope), ("acceptance", _flatten_repeated(args.set_acceptance))):
+        if value is not None and (key != "acceptance" or args.set_acceptance is not None):
+            brief[key] = value; changes.append(key)
+    for key, values in (("scope", args.add_scope), ("out_of_scope", args.add_out_of_scope), ("acceptance", _flatten_repeated(args.add_acceptance)), ("assumptions", args.add_assumption), ("open_questions", args.add_open_question)):
+        if values:
+            brief[key].extend(value for value in values if value not in brief[key]); changes.append(f"add {key}")
+    for question in args.resolve_open_question or []:
+        if question not in brief["open_questions"]:
+            raise EngineError(f"open question not found: {question}")
+        brief["open_questions"].remove(question); changes.append("resolve open question")
+    if not changes:
+        raise EngineError("plan-draft update requires at least one field change")
+    _draft_event(draft, "update", args.actor, args.summary)
+    _save_plan_draft(draft, path, args.expected_revision)
+    return {"draft": draft["id"], "revision": draft["revision"], "changed": changes, "summary": args.summary}
+
+
+def cmd_plan_draft_add_task(args: argparse.Namespace) -> dict:
+    path, draft = _load_plan_draft(args.id)
+    _assert_draft_editable(draft)
+    if args.expected_revision != draft["revision"]:
+        raise EngineError(f"stale plan draft revision: expected {args.expected_revision}, found {draft['revision']}")
+    tasks = _draft_task_index(draft)
+    if args.task_id in tasks:
+        raise EngineError(f"plan draft task already exists: {args.task_id}; use plan-draft update-task")
+    task = _draft_task_from_args(args)
+    draft["tasks"].append(task)
+    _draft_event(draft, "add-task", args.actor, f"proposed task {args.task_id} added")
+    _save_plan_draft(draft, path, args.expected_revision)
+    return {"draft": draft["id"], "revision": draft["revision"], "task": task}
+
+
+def cmd_plan_draft_update_task(args: argparse.Namespace) -> dict:
+    path, draft = _load_plan_draft(args.id)
+    _assert_draft_editable(draft)
+    if args.expected_revision != draft["revision"]:
+        raise EngineError(f"stale plan draft revision: expected {args.expected_revision}, found {draft['revision']}")
+    task = _draft_task_index(draft).get(args.task_id)
     if not task:
-        raise EngineError(f"unknown task: {args.id}")
+        raise EngineError(f"unknown plan draft task: {args.task_id}")
+    changes = []
+    for field in ("title", "owner", "phase", "context", "epic"):
+        value = getattr(args, field)
+        if value is not None:
+            task[field] = value; changes.append(field)
+    for field, value in (("needs", args.set_needs), ("acceptance", _flatten_repeated(args.set_acceptance)), ("files", args.set_files), ("tags", args.set_tags), ("depends_on", args.set_depends_on)):
+        if value is not None and (field != "acceptance" or args.set_acceptance is not None):
+            task[field] = value; changes.append(field)
+    if not changes:
+        raise EngineError("plan-draft update-task requires at least one field change")
+    _draft_event(draft, "update-task", args.actor, args.summary)
+    _save_plan_draft(draft, path, args.expected_revision)
+    return {"draft": draft["id"], "revision": draft["revision"], "task": task, "changed": changes}
+
+
+def cmd_plan_draft_finalize(args: argparse.Namespace) -> dict:
+    path, draft = _load_plan_draft(args.id)
+    _assert_draft_editable(draft)
+    if args.expected_revision != draft["revision"]:
+        raise EngineError(f"stale plan draft revision: expected {args.expected_revision}, found {draft['revision']}")
+    if not args.confirmed_by_user:
+        raise EngineError("plan-draft finalize requires --confirmed-by-user after the Planner presents the plan and receives explicit user approval")
+    _validate_draft_ready(draft)
+    draft["status"] = "ready"
+    _draft_event(draft, "finalize", args.actor, "user-approved draft is ready; Planner must now ask whether to create tasks")
+    _save_plan_draft(draft, path, args.expected_revision)
+    return {"draft": draft["id"], "revision": draft["revision"], "status": draft["status"], "tasks": [task["id"] for task in draft["tasks"]]}
+
+
+def cmd_plan_draft_reopen(args: argparse.Namespace) -> dict:
+    path, draft = _load_plan_draft(args.id)
+    if draft["status"] != "ready":
+        raise EngineError(f"only a ready plan draft can be reopened (current status: {draft['status']})")
+    if args.expected_revision != draft["revision"]:
+        raise EngineError(f"stale plan draft revision: expected {args.expected_revision}, found {draft['revision']}")
+    draft["status"] = "drafting"
+    _draft_event(draft, "reopen", args.actor, args.reason)
+    _save_plan_draft(draft, path, args.expected_revision)
+    return {"draft": draft["id"], "revision": draft["revision"], "status": draft["status"]}
+
+
+def cmd_plan_draft_materialize(args: argparse.Namespace) -> dict:
+    draft_path, draft = _load_plan_draft(args.id)
+    state_file = state_path(args.state)
+    if not args.create_tasks:
+        raise EngineError("plan-draft materialize requires --create-tasks after the Planner receives a separate explicit user request to create the task DAG")
+    if draft["status"] == "materialized":
+        if _matching_materialized_state(state_file, draft):
+            return {"draft": draft["id"], "status": "materialized", "state": display_path(state_file), "tasks": [task["id"] for task in draft["tasks"]], "idempotent": True}
+        raise EngineError("materialized plan draft does not match the requested workflow state; inspect its materialization record")
+    if draft["status"] != "ready":
+        raise EngineError("plan draft must be finalized (status ready) before materialization")
+    _validate_draft_ready(draft)
+    source_revision = draft["revision"]
+    digest = _draft_digest(draft)
+    if state_file.exists():
+        # Recovery after the workflow file was atomically written but the
+        # process stopped before the draft could be marked materialized.
+        existing = load(state_file)
+        validate(existing)
+        source = existing.get("source_plan") or {}
+        if source == {"id": draft["id"], "revision": source_revision, "digest": digest, "draft": display_path(draft_path)}:
+            draft["status"] = "materialized"
+            draft["materialization"] = {"state": display_path(state_file), "source_revision": source_revision, "digest": digest}
+            _draft_event(draft, "materialize-recovery", args.actor, "recovered existing matching workflow state")
+            _save_plan_draft(draft, draft_path, source_revision)
+            return {"draft": draft["id"], "status": "materialized", "state": display_path(state_file), "tasks": [task["id"] for task in draft["tasks"]], "recovered": True}
+        raise EngineError(f"workflow state already exists: {display_path(state_file)}; materialization never overwrites a workflow")
+    state = new_state(draft["title"], draft["workflow"])
+    state["source_plan"] = {"id": draft["id"], "revision": source_revision, "digest": digest, "draft": display_path(draft_path)}
+    base_commit = _git_head()
+    contracts = []
+    for task in draft["tasks"]:
+        runtime, payload = _draft_to_runtime_task(task, base_commit)
+        state["tasks"].append(runtime)
+        contracts.append((runtime["id"], payload))
+    validate(state)
+    sync_phases(state)
+    materialization_event = {
+        "ts": now(), "action": "materialize-plan-draft", "task": None, "actor": args.actor,
+        "from": None, "to": None, "detail": f"materialized {draft['id']} revision {source_revision}",
+    }
+    state["events"].append(materialization_event)
+    # Create-only save gives the DAG one atomic control-plane commit and
+    # refuses a concurrent writer instead of replacing its workflow.
+    save(state, state_file, -1)
+    # These are derived artifacts.  They are intentionally written only after
+    # the create-only workflow save succeeds, so a racing workflow cannot have
+    # its own workspace artifacts touched by this materialization attempt.
+    sync_tasks_md(state, state_file)
+    event_log = workspace(state_file) / "logs" / "events.jsonl"
+    event_log.parent.mkdir(parents=True, exist_ok=True)
+    with event_log.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(materialization_event) + "\n")
+    for task_id, payload in contracts:
+        _write_contract_payload(payload, task_id, state_file)
+    _auto_generate_visualizer_data(state_file)
+    draft["status"] = "materialized"
+    draft["materialization"] = {"state": display_path(state_file), "source_revision": source_revision, "digest": digest}
+    _draft_event(draft, "materialize", args.actor, f"created workflow {display_path(state_file)}")
+    _save_plan_draft(draft, draft_path, source_revision)
+    return {"draft": draft["id"], "status": "materialized", "state": display_path(state_file), "tasks": [task["id"] for task in draft["tasks"]], "idempotent": False}
+
+
+def cmd_plan_draft_show(args: argparse.Namespace) -> dict:
+    _path, draft = _load_plan_draft(args.id)
+    return draft
+
+
+def cmd_route(args: argparse.Namespace) -> dict:
+    state_file = state_path(args.state)
+    state = load(state_file); validate(state)
+    task = _resolve_task_definition(args.id, state, state_file)
+    # A route always carries the current project snapshot. On a cache hit this
+    # performs only the bounded fingerprint check, not repository discovery.
+    project_context, project_context_cache = _load_or_refresh_project_context(state_file)
     role = task["owner"]
     registry = _load_registry()
     domains = registry["owners"].get(role, ROLE_DOMAINS.get(role, []))
@@ -1528,8 +2258,8 @@ def cmd_route(args: argparse.Namespace) -> dict:
         # docker-compose-local, whose directory name is neither).
         declared_tags = stack_skills.get(skill_dir.relative_to(ROOT).as_posix(), [])
         matched_tags = [tag for tag in declared_tags if tag in tokens]
-        if skill_name in tokens or domain_name in tokens:
-            add_technology(skill_dir, f"role-domain:{domain_name}", "role-technology")
+        if skill_name in tokens:
+            add_technology(skill_dir, f"task-skill:{skill_name}", "role-technology")
         elif matched_tags:
             add_technology(skill_dir, f"stack:{','.join(sorted(matched_tags))}", "role-technology")
 
@@ -1573,14 +2303,22 @@ def cmd_route(args: argparse.Namespace) -> dict:
         item["loading_order"] = idx
 
     skills = [item["entrypoint"] for item in all_details]
-    root = workspace(state_path(args.state))
+    root = workspace(state_file)
+    snapshot_path = _project_context_snapshot_path(state_file)
+    context_paths = [display_path(snapshot_path), display_path(root / "plan" / "plan.md"), display_path(root / "tasks" / "tasks.md"), ".ai/engine/state-schema.md", *task["files"]]
     response = {
         "task": task["id"],
         "owner": role,
         "tags": task["tags"],
         "role_contract": (Path(".ai") / "agents" / role).as_posix(),
         "skills": skills,
-        "context": [display_path(root / "plan" / "plan.md"), display_path(root / "tasks" / "tasks.md"), ".ai/engine/state-schema.md"] + task["files"],
+        "context": list(dict.fromkeys(context_paths)),
+        "project_context": {
+            "path": display_path(snapshot_path),
+            "schema_version": project_context["schema_version"],
+            "fingerprint": project_context["context_snapshot"]["fingerprint"],
+            "cache_status": project_context_cache,
+        },
         "skill_details": all_details,
         "trigger_matches": trigger_matches,
         "loading_instructions": [
@@ -1886,7 +2624,37 @@ def _generate_dag_payload(state: dict) -> dict:
     }
 
 
-def _drift_flags(task: dict) -> dict:
+def _task_contract_drift(task: dict, state_file: Path) -> str | None:
+    """Detect whether a task's own contract file (.ai-work/tasks/<id>.json)
+    still matches the hash workflow.json recorded for it.
+
+    ``add-task``/``plan``/``update-task`` are the only writers of a contract
+    file and always update workflow.json's ``contract_hash`` in the same
+    write, so a mismatch here means the file was edited by hand (or
+    otherwise changed) outside those commands -- this is the read-time
+    detection half of "don't hand-edit a contract file" (state-schema.md);
+    nothing blocks the edit itself, the same as ``contract_stale`` below
+    never blocks on a stale depends-on file.
+
+    Returns ``None`` when clean, including a task that predates contract
+    tracking (no ``contract_hash`` recorded, nothing to compare against).
+    Otherwise a short reason: ``"missing"`` (hash recorded but the file is
+    gone), ``"unavailable"`` (exists but unreadable), or ``"hash_mismatch"``.
+    """
+    recorded_hash = task.get("contract_hash")
+    if recorded_hash is None:
+        return None
+    contract_path = workspace(state_file) / "tasks" / f"{task['id']}.json"
+    if not contract_path.exists():
+        return "missing"
+    try:
+        current_hash = hashlib.sha256(contract_path.read_bytes()).hexdigest()
+    except OSError:
+        return "unavailable"
+    return None if current_hash == recorded_hash else "hash_mismatch"
+
+
+def _drift_flags(task: dict, state_file: Path) -> dict:
     """Compute read-time drift signals without mutating workflow state.
 
     Missing contract files remain ``contract-stale`` for compatibility. A
@@ -1932,6 +2700,7 @@ def _drift_flags(task: dict) -> dict:
         "epic_stale": epic_stale,
         "contract_stale": contract_stale,
         "drift_unavailable": drift_unavailable,
+        "task_contract_drift": _task_contract_drift(task, state_file),
     }
 
 
@@ -1943,16 +2712,18 @@ def cmd_drift(args: argparse.Namespace) -> dict:
     to decide whether a task needs a re-plan.
     """
     import subprocess as _sp
-    state = load(state_path(args.state)); validate(state)
+    state_file = state_path(args.state)
+    state = load(state_file); validate(state)
     task = task_map(state).get(args.id)
     if not task:
         raise EngineError(f"unknown task: {args.id}")
     report: dict = {"task": task["id"]}
-    flags = _drift_flags(task)
+    flags = _drift_flags(task, state_file)
     contract_stale = flags["contract_stale"]
     report["contract_stale"] = contract_stale
     report["drift_unavailable"] = flags["drift_unavailable"]
     report["upstream_context_stale"] = flags["upstream_context_stale"]
+    report["task_contract_drift"] = flags["task_contract_drift"]
 
     base_commit = task.get("base_commit")
     report["base_commit"] = base_commit
@@ -1984,6 +2755,71 @@ def cmd_drift(args: argparse.Namespace) -> dict:
     return report
 
 
+def cmd_backfill_contracts(args: argparse.Namespace) -> dict:
+    """Materialize/repair .ai-work/tasks/<id>.json for tasks lacking one.
+
+    Buckets each task by its `_task_contract_drift` status:
+    - no `contract_hash` recorded yet (a pre-feature task, e.g. this repo's
+      T1-T9): write a fresh revision-1 contract. This is the step-5
+      migration referenced in state-schema.md's Task contract files
+      section -- `update-task` already backfills a task's first contract as
+      a side effect the next time it touches acceptance/files/tags; this
+      covers tasks nothing ever calls `update-task` on before dispatch.
+    - `contract_hash` recorded but the file is gone ("missing" drift):
+      rewritten unconditionally -- there is nothing to protect, the file
+      simply doesn't exist.
+    - `contract_hash` recorded and the file exists but no longer matches
+      ("hash_mismatch", i.e. hand-edited): left alone and reported under
+      "protected" unless `--force`, since overwriting would silently
+      discard that edit. "unavailable" (exists but unreadable) is treated
+      the same way -- not ours to overwrite blind.
+    - already matching: reported under "up_to_date", untouched.
+
+    Idempotent and scoped to one task with `--id`, or every task in the
+    state by default. A single `workflow.json` save covers every task
+    touched in one call, rather than one save per task.
+    """
+    state_file = state_path(args.state)
+    state = load(state_file); validate(state)
+    only_id = getattr(args, "id", None)
+    if only_id and only_id not in task_map(state):
+        raise EngineError(f"unknown task: {only_id}")
+    migrated, restored, regenerated, protected, up_to_date = [], [], [], [], []
+    for task in state["tasks"]:
+        if only_id and task["id"] != only_id:
+            continue
+        drift = _task_contract_drift(task, state_file)
+        if task.get("contract_hash") is None:
+            bucket = migrated
+        elif drift == "missing":
+            bucket = restored
+        elif drift == "hash_mismatch" and args.force:
+            bucket = regenerated
+        elif drift in ("hash_mismatch", "unavailable"):
+            protected.append(task["id"])
+            continue
+        else:
+            up_to_date.append(task["id"])
+            continue
+        next_revision = (task.get("contract_revision") or 0) + 1
+        created_at = _existing_contract_created_at(task["id"], state_file) or now()
+        payload, digest = _build_task_contract(task, next_revision, created_at, now())
+        task["contract_revision"] = next_revision
+        task["contract_hash"] = digest
+        _write_contract_payload(payload, task["id"], state_file)
+        bucket.append(task["id"])
+    touched = migrated + restored + regenerated
+    if touched:
+        event(
+            state, state_file, "backfill-contracts", None, args.actor, None, None,
+            f"migrated: {', '.join(migrated) or 'none'}; restored: {', '.join(restored) or 'none'}; "
+            f"regenerated: {', '.join(regenerated) or 'none'}",
+        )
+        save(state, state_file, state["revision"])
+        _auto_generate_visualizer_data(state_file)
+    return {"migrated": migrated, "restored": restored, "regenerated": regenerated, "protected": protected, "up_to_date": up_to_date}
+
+
 def cmd_epics(args: argparse.Namespace) -> list:
     state = load(state_path(args.state)); validate(state)
     groups: dict[str, dict] = {}
@@ -2002,6 +2838,17 @@ def cmd_epics(args: argparse.Namespace) -> list:
     ]
 
 
+def cmd_activate(args: argparse.Namespace) -> dict:
+    """Select one isolated workflow for tools that use the default state."""
+    path = Path(args.workflow_state).resolve()
+    state = load(path); validate(state)
+    active = [task["id"] for task in state["tasks"] if task["status"] == "in-progress"]
+    summary = {"version": 1, "workflow_state": display_path(path), "workflow_id": state["workflow_id"], "title": state["title"], "workflow": state["workflow"], "active_tasks": active, "updated_at": now()}
+    CURRENT.parent.mkdir(parents=True, exist_ok=True)
+    CURRENT.write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
+    return summary
+
+
 def cmd_status(args: argparse.Namespace) -> dict:
     state = load(state_path(args.state)); validate(state)
     context = getattr(args, "context", None)
@@ -2012,14 +2859,30 @@ def cmd_status(args: argparse.Namespace) -> dict:
     ]
     counts = {status: 0 for status in STATUSES}
     for task in scoped: counts[task["status"]] += 1
-    result = {"title": state["title"], "revision": state["revision"], "counts": counts, "phases": sync_phases(state) or state["phases"]}
+    # Status is an inspection command and must stay usable for a newly
+    # initialized/minimal workspace that has not configured automation yet.
+    # Dispatch/pipeline still validate this configuration when they need it.
+    try:
+        roles = _load_automation_roles()
+    except EngineError:
+        roles = {"qa": {"enabled": False}, "reviewer": {"enabled": False}}
+    enabled = [role for role in ("qa", "reviewer") if roles[role]["enabled"]]
+    mode = "autonomous" if len(enabled) == 2 else "assisted" if enabled else "manual"
+    awaiting = []
+    for task in scoped:
+        if task["status"] == "implementation-complete" and not roles["qa"]["enabled"]:
+            awaiting.append({"task": task["id"], "role": "qa", "status": "awaiting-manual-qa"})
+        elif task["status"] == "qa-passed" and not roles["reviewer"]["enabled"]:
+            awaiting.append({"task": task["id"], "role": "review", "status": "awaiting-manual-review"})
+    role_config = {name: {"enabled": roles[name]["enabled"], "runner": roles[name].get("runner"), "model": roles[name].get("model")} for name in ("qa", "reviewer")}
+    result = {"title": state["title"], "workflow_id": state["workflow_id"], "revision": state["revision"], "counts": counts, "phases": sync_phases(state) or state["phases"], "approval_mode": {"mode": mode, "roles": role_config, "enabled_roles": enabled, "awaiting": awaiting}}
     if context: result["context"] = context
     if epic: result["epic"] = epic
     return result
 
 
-def _board_entry(task: dict) -> dict:
-    drift = _drift_flags(task)
+def _board_entry(task: dict, state_file: Path) -> dict:
+    drift = _drift_flags(task, state_file)
     flags = []
     if task["status"] == "blocked":
         flags.append("blocked")
@@ -2031,6 +2894,8 @@ def _board_entry(task: dict) -> dict:
         flags.append("contract-stale")
     if drift["drift_unavailable"]:
         flags.append("drift-unavailable")
+    if drift["task_contract_drift"]:
+        flags.append(f"task-contract-{drift['task_contract_drift'].replace('_', '-')}")
     entry = {
         "id": task["id"],
         "title": task["title"],
@@ -2080,7 +2945,7 @@ def cmd_board(args: argparse.Namespace) -> dict | str:
     ]
     board = {status: [] for status in STATUSES}
     for task in scoped:
-        board[task["status"]].append(_board_entry(task))
+        board[task["status"]].append(_board_entry(task, state_path_value))
     markdown = _render_board_markdown(board)
     if args.write:
         output_path = workspace(state_path_value) / "board.md"
@@ -2205,23 +3070,83 @@ def cmd_onboard(args: argparse.Namespace) -> dict:
     return proposal
 
 
-ANALYZE_SCHEMA_VERSION = 1
+ANALYZE_SCHEMA_VERSION = 2
+PROJECT_CONTEXT_SNAPSHOT_SCHEMA_VERSION = 1
+# These are the small, explicit project inputs the analyzer reads.  Their
+# hashes, plus Git's revision/diff fingerprint, let us decide whether a saved
+# project-context snapshot is still usable without walking source trees.
+ANALYSIS_INPUT_PATHS = (
+    ".ai-config/kit.yaml",
+    ".ai-config/contexts.yaml",
+    "package.json",
+    "composer.json",
+    "pyproject.toml",
+    "requirements.txt",
+    "Dockerfile",
+    *COMPOSE_FILENAMES,
+)
 
 
-def cmd_analyze(args: argparse.Namespace) -> dict:
-    """Project Analyzer + Knowledge Graph Builder: a read-only static-analysis
-    snapshot combining stack/runtime detection (same detection `onboard`
-    uses) with the module and ownership graph declared in
-    `.ai-config/contexts.yaml`, plus a short list of static-analysis risk
-    signals.
+def _sha256_file(path: Path) -> str | None:
+    """Return a file-content digest, or a stable absence marker input."""
+    if not path.is_file():
+        return None
+    return hashlib.sha256(path.read_bytes()).hexdigest()
 
-    This is deliberately scoped to what the repo's own config actually
-    declares -- a bounded-context/module graph and its owners -- not a
-    language-aware entity/API extractor. There is no parser here for
-    arbitrary source languages, and this function must not grow one; a task
-    that needs that is a new, separately-scoped capability with its own
-    tests, not a quiet expansion of this one.
+
+def _git_capture(*args: str) -> str | None:
+    """Read a small Git metadata value without falling back to a tree scan."""
+    try:
+        completed = subprocess.run(
+            ["git", *args], cwd=ROOT, text=True, capture_output=True, check=False
+        )
+    except OSError:
+        return None
+    return completed.stdout if completed.returncode == 0 else None
+
+
+def _project_context_fingerprint() -> tuple[str, dict]:
+    """Fingerprint analyzer inputs using config/marker hashes and Git metadata.
+
+    `git diff --raw HEAD` compares the index and working tree to one commit;
+    it returns blob metadata rather than loading a full textual patch and does
+    not make the Python engine enumerate or open every source file. Its digest
+    covers both the changed paths and their contents, so a second edit to the
+    same tracked file cannot incorrectly reuse the previous snapshot.
     """
+    files = {relative: _sha256_file(ROOT / relative) for relative in ANALYSIS_INPUT_PATHS}
+    head = _git_capture("rev-parse", "--verify", "HEAD")
+    diff = _git_capture("diff", "--raw", "--no-ext-diff", "HEAD", "--")
+    inputs = {
+        "files": files,
+        "git_head": head.strip() if head else None,
+        "tracked_worktree_diff": hashlib.sha256(diff.encode("utf-8")).hexdigest() if diff is not None else None,
+    }
+    encoded = json.dumps(inputs, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest(), inputs
+
+
+def _project_context_snapshot_path(state_file: Path) -> Path:
+    return workspace(state_file) / "analysis" / "project-summary.json"
+
+
+def _read_valid_project_context_snapshot(state_file: Path, fingerprint: str) -> dict | None:
+    path = _project_context_snapshot_path(state_file)
+    try:
+        snapshot = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    metadata = snapshot.get("context_snapshot")
+    if not isinstance(metadata, dict):
+        return None
+    if snapshot.get("schema_version") != ANALYZE_SCHEMA_VERSION:
+        return None
+    if metadata.get("schema_version") != PROJECT_CONTEXT_SNAPSHOT_SCHEMA_VERSION:
+        return None
+    return snapshot if metadata.get("fingerprint") == fingerprint else None
+
+
+def _build_project_context_snapshot(fingerprint: str, inputs: dict) -> dict:
     onboard_proposal = cmd_onboard(argparse.Namespace(apply=False))
     contexts = _load_contexts()
     modules = {
@@ -2245,21 +3170,55 @@ def cmd_analyze(args: argparse.Namespace) -> dict:
     if not onboard_proposal.get("verification"):
         risks.append({"kind": "no_verification_command", "detail": "no test/lint/build command detected; verify will report inconclusive"})
 
-    summary = {
+    return {
         "schema_version": ANALYZE_SCHEMA_VERSION,
         "generated_at": now(),
+        "context_snapshot": {
+            "schema_version": PROJECT_CONTEXT_SNAPSHOT_SCHEMA_VERSION,
+            "fingerprint": fingerprint,
+            "inputs": inputs,
+        },
         "stack": onboard_proposal["stack"],
         "container_runtime": onboard_proposal["container_runtime"],
         "modules": modules,
         "ownership": ownership,
         "risks": risks,
     }
-    output_dir = workspace(state_path(args.state)) / "analysis"
-    output_dir.mkdir(parents=True, exist_ok=True)
-    (output_dir / "project-summary.json").write_text(
-        json.dumps(summary, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+
+
+def _load_or_refresh_project_context(state_file: Path, *, refresh: bool = False) -> tuple[dict, str]:
+    fingerprint, inputs = _project_context_fingerprint()
+    snapshot = None if refresh else _read_valid_project_context_snapshot(state_file, fingerprint)
+    if snapshot is not None:
+        return snapshot, "hit"
+
+    snapshot = _build_project_context_snapshot(fingerprint, inputs)
+    path = _project_context_snapshot_path(state_file)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(snapshot, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    return snapshot, "refreshed"
+
+
+def cmd_analyze(args: argparse.Namespace) -> dict:
+    """Project Analyzer + Knowledge Graph Builder: a read-only static-analysis
+    snapshot combining stack/runtime detection (same detection `onboard`
+    uses) with the module and ownership graph declared in
+    `.ai-config/contexts.yaml`, plus a short list of static-analysis risk
+    signals.
+
+    This is deliberately scoped to what the repo's own config actually
+    declares -- a bounded-context/module graph and its owners -- not a
+    language-aware entity/API extractor. There is no parser here for
+    arbitrary source languages, and this function must not grow one; a task
+    that needs that is a new, separately-scoped capability with its own
+    tests, not a quiet expansion of this one.
+    """
+    summary, cache_status = _load_or_refresh_project_context(
+        state_path(getattr(args, "state", None)), refresh=getattr(args, "refresh", False)
     )
-    return summary
+    # `cache` describes this command result only; the durable snapshot's
+    # fingerprint and inputs live in `context_snapshot` above.
+    return {**summary, "cache": {"status": cache_status}}
 
 
 # ── ARCHITECTURE DISCOVERY ───────────────────────────────────────────────
@@ -2737,12 +3696,27 @@ def _post_completion_lock_path(task_id: str, state_arg: str | None) -> Path:
 def _acquire_task_lock(lock_path: Path) -> bool:
     """Best-effort exclusive file lock so two concurrent post-completion
     triggers for the same task never run their pipelines at the same time.
-    Returns False (without blocking) if the lock is already held.
+    Removes a lock whose recorded process no longer exists, then retries the
+    acquire. Returns False (without blocking) if the lock is still held.
     """
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     try:
         fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
     except FileExistsError:
+        try:
+            owner_pid = int(lock_path.read_text(encoding="utf-8").strip())
+        except (OSError, ValueError):
+            return False
+        try:
+            os.kill(owner_pid, 0)
+        except ProcessLookupError:
+            try:
+                lock_path.unlink()
+            except FileNotFoundError:
+                pass
+            return _acquire_task_lock(lock_path)
+        except PermissionError:
+            pass
         return False
     with os.fdopen(fd, "w") as handle:
         handle.write(str(os.getpid()))
@@ -2783,8 +3757,18 @@ def _dispatch_approval(task_id: str, role: str, state_arg: str | None, agent_id:
         raise EngineError(f"cannot dispatch {role} approval for {task_id} from status {task['status']} (expected {expected_status})")
 
     roles = _load_automation_roles()
+    if not roles[role_key]["enabled"]:
+        raise EngineError(
+            f"role '{role_key}' is disabled in .ai-config/automation.yaml (roles.{role_key}.enabled: false); "
+            f"it must be verified manually via 'ai-kit approve {task_id} --role {role} ...', not dispatched"
+        )
     exec_runner, _exec_entry, exec_model = _resolve_runner(None, None)
-    runner_name, runner, model = _resolve_runner(roles[role_key]["runner"], roles[role_key].get("model"))
+    config = _load_post_completion_config()
+    task_attempts = task.get("attempts", 0)
+    use_backup = task_attempts > config["backup_after_retries"]
+    runner_key = "backup_runner" if use_backup and roles[role_key].get("backup_runner") else "runner"
+    model_key = "backup_model" if use_backup and roles[role_key].get("backup_model") else "model"
+    runner_name, runner, model = _resolve_runner(roles[role_key][runner_key], roles[role_key].get(model_key))
     if (runner_name, model) == (exec_runner, exec_model):
         raise EngineError(
             f".ai-config/automation.yaml: role '{role_key}' resolves to the same identity as 'executor' "
@@ -2839,7 +3823,7 @@ def _dispatch_approval(task_id: str, role: str, state_arg: str | None, agent_id:
         "ts": now(), "task": task_id, "role": role, "runner": runner_name, "model": model,
         "command": cmd, "exit_code": result.returncode, "handoff_file": display_path(handoff_path),
     }
-    audit_path = workspace(path) / f"dispatch_log_{role}_{task_id}.json"
+    audit_path = _dispatch_audit_path(path, task_id, role)
     audit_path.parent.mkdir(parents=True, exist_ok=True)
     audit_path.write_text(json.dumps(audit, indent=2) + "\n", encoding="utf-8")
     if result.returncode != 0:
@@ -2856,6 +3840,27 @@ def _dispatch_approval(task_id: str, role: str, state_arg: str | None, agent_id:
     return task
 
 
+def _retry_rejected_task(task_id: str, state_arg: str | None, agent_id: str | None, lock_path: Path) -> dict | None:
+    """Re-dispatch a rejected task when bounded retry automation is enabled."""
+    config = _load_post_completion_config()
+    path = state_path(state_arg)
+    state = load(path); validate(state)
+    task = task_map(state).get(task_id)
+    if (
+        not config["retry_on_rejection"]
+        or task is None
+        or task["status"] != "todo"
+        or task.get("attempts", 0) > config["max_retries"]
+    ):
+        return None
+    retry_number = task.get("attempts", 0)
+    event(state, path, "post-completion-retry", task, "system", "todo", "todo", f"retry {retry_number}/{config['max_retries']} after QA/review rejection")
+    save(state, path, state["revision"])
+    _release_task_lock(lock_path)
+    cmd_dispatch(argparse.Namespace(state=state_arg, id=task_id, runner=None, model=None, agent_id=agent_id))
+    return _run_post_completion(task_id, state_arg, agent_id=agent_id)
+
+
 def _run_post_completion(task_id: str, state_arg: str | None, agent_id: str | None = None) -> dict:
     """Run verify -> independent QA -> independent review -> close.
 
@@ -2866,6 +3871,15 @@ def _run_post_completion(task_id: str, state_arg: str | None, agent_id: str | No
     Serialized per task via a lock file (released in `finally`) so two
     concurrent triggers for the same task only ever produce one pipeline
     run; a duplicate call while one is already in flight is a safe no-op.
+
+    'verify' always runs (it is deterministic checks, not a judgment call).
+    QA and review each only dispatch a CLI runner when
+    `.ai-config/automation.yaml`'s `roles.qa`/`roles.reviewer` has
+    `enabled: true` (the default). A disabled role stops the chain right
+    before it, leaving the task parked at `implementation-complete` (qa
+    disabled) or `qa-passed` (review disabled) with a `post-completion-
+    manual-<role>` event recorded -- the expected next step is a human or an
+    interactive session verifying by hand via `ai-kit approve`/`transition`.
     """
     lock_path = _post_completion_lock_path(task_id, state_arg)
     if not _acquire_task_lock(lock_path):
@@ -2881,6 +3895,7 @@ def _run_post_completion(task_id: str, state_arg: str | None, agent_id: str | No
         if task["status"] not in {"implementation-complete", "qa-passed", "review-approved"}:
             return {"task": task_id, "post_completion": f"noop-status-{task['status']}"}
 
+        roles = _load_automation_roles()
         event(state, path, "post-completion-start", task, "system", task["status"], task["status"], "automated post-completion pipeline started")
         save(state, path, state["revision"])
 
@@ -2894,6 +3909,12 @@ def _run_post_completion(task_id: str, state_arg: str | None, agent_id: str | No
                 save(state, path, state["revision"])
                 return {"task": task_id, "post_completion": "verify-failed", "report": report}
 
+            if not roles["qa"]["enabled"]:
+                state = load(path); task = task_map(state).get(task_id)
+                event(state, path, "post-completion-manual-qa", task, "system", task["status"], task["status"], "roles.qa.enabled is false; verify(passed) done, waiting for manual 'ai-kit approve --role qa'")
+                save(state, path, state["revision"])
+                return {"task": task_id, "post_completion": "qa-manual", "status": task["status"]}
+
             print(f"[post-completion] {task_id}: dispatching QA...", file=sys.stderr)
             try:
                 task = _dispatch_approval(task_id, "qa", state_arg, agent_id=agent_id)
@@ -2903,9 +3924,18 @@ def _run_post_completion(task_id: str, state_arg: str | None, agent_id: str | No
                 save(state, path, state["revision"])
                 return {"task": task_id, "post_completion": "qa-error", "error": str(exc)}
             if task["status"] != "qa-passed":
+                retry_result = _retry_rejected_task(task_id, state_arg, agent_id, lock_path)
+                if retry_result is not None:
+                    return retry_result
                 return {"task": task_id, "post_completion": "qa-rejected", "status": task["status"]}
 
         if task["status"] == "qa-passed":
+            if not roles["reviewer"]["enabled"]:
+                state = load(path); task = task_map(state).get(task_id)
+                event(state, path, "post-completion-manual-review", task, "system", task["status"], task["status"], "roles.reviewer.enabled is false; qa-passed, waiting for manual 'ai-kit approve --role review'")
+                save(state, path, state["revision"])
+                return {"task": task_id, "post_completion": "review-manual", "status": task["status"]}
+
             print(f"[post-completion] {task_id}: dispatching review...", file=sys.stderr)
             try:
                 task = _dispatch_approval(task_id, "review", state_arg, agent_id=agent_id)
@@ -2915,6 +3945,9 @@ def _run_post_completion(task_id: str, state_arg: str | None, agent_id: str | No
                 save(state, path, state["revision"])
                 return {"task": task_id, "post_completion": "review-error", "error": str(exc)}
             if task["status"] != "review-approved":
+                retry_result = _retry_rejected_task(task_id, state_arg, agent_id, lock_path)
+                if retry_result is not None:
+                    return retry_result
                 return {"task": task_id, "post_completion": "review-rejected", "status": task["status"]}
 
         if task["status"] == "review-approved":
@@ -2925,6 +3958,29 @@ def _run_post_completion(task_id: str, state_arg: str | None, agent_id: str | No
                 expected_revision=None, agent_id=None,
             )
             task = _retry_transition(close_args)
+            if _load_post_completion_config().get("dispatch_ready_on_close"):
+                dispatch_result = cmd_dispatch_ready(argparse.Namespace(
+                    state=state_arg,
+                    runner=None,
+                    model=None,
+                    limit=_load_post_completion_config()["dispatch_ready_limit"],
+                    context=None,
+                    epic=None,
+                    agent_id=None,
+                ))
+                state = load(path)
+                task = task_map(state).get(task_id)
+                event(
+                    state,
+                    path,
+                    "post-completion-dispatch-ready",
+                    task,
+                    "system",
+                    task["status"],
+                    task["status"],
+                    f"dispatched {len(dispatch_result.get('spawned', []))} ready task(s)",
+                )
+                save(state, path, state["revision"])
 
         return {"task": task_id, "post_completion": "done", "status": task["status"]}
     finally:
@@ -2949,25 +4005,34 @@ def cmd_pipeline(args: argparse.Namespace) -> dict:
     phase instead of re-dispatching the executor. There is no automatic retry
     across phases -- a stalled or failed phase stops here and reports why;
     resume by re-running after fixing the cause.
+
+    A role with `roles.<qa|reviewer>.enabled: false` in automation.yaml is
+    never dispatched or identity-checked here -- `_run_post_completion` parks
+    the task right before that role's verdict instead (`qa-manual` /
+    `review-manual`), which this command reports back as a normal (non-error)
+    result rather than "pipeline stopped", since a disabled role is an
+    intentional handoff to manual verification, not a failure.
     """
-    state = load(state_path(args.state)); validate(state)
-    task = task_map(state).get(args.id)
-    if not task:
-        raise EngineError(f"unknown task: {args.id}")
+    state_file = state_path(args.state)
+    state = load(state_file); validate(state)
+    task = _resolve_task_definition(args.id, state, state_file)
     roles = _load_automation_roles()
     exec_runner, _exec_entry, exec_model = _resolve_runner(None, None)
-    qa_runner, _qa_entry, qa_model = _resolve_runner(roles["qa"]["runner"], roles["qa"].get("model"))
-    rev_runner, _rev_entry, rev_model = _resolve_runner(roles["reviewer"]["runner"], roles["reviewer"].get("model"))
-    if (qa_runner, qa_model) == (exec_runner, exec_model):
-        raise EngineError(
-            f".ai-config/automation.yaml: role 'qa' resolves to the same identity as 'executor' "
-            f"({qa_runner}/{qa_model}); QA must run under a different runner or model"
-        )
-    if (rev_runner, rev_model) == (exec_runner, exec_model):
-        raise EngineError(
-            f".ai-config/automation.yaml: role 'reviewer' resolves to the same identity as 'executor' "
-            f"({rev_runner}/{rev_model}); review must run under a different runner or model"
-        )
+    qa_runner = qa_model = rev_runner = rev_model = None
+    if roles["qa"]["enabled"]:
+        qa_runner, _qa_entry, qa_model = _resolve_runner(roles["qa"]["runner"], roles["qa"].get("model"))
+        if (qa_runner, qa_model) == (exec_runner, exec_model):
+            raise EngineError(
+                f".ai-config/automation.yaml: role 'qa' resolves to the same identity as 'executor' "
+                f"({qa_runner}/{qa_model}); QA must run under a different runner or model"
+            )
+    if roles["reviewer"]["enabled"]:
+        rev_runner, _rev_entry, rev_model = _resolve_runner(roles["reviewer"]["runner"], roles["reviewer"].get("model"))
+        if (rev_runner, rev_model) == (exec_runner, exec_model):
+            raise EngineError(
+                f".ai-config/automation.yaml: role 'reviewer' resolves to the same identity as 'executor' "
+                f"({rev_runner}/{rev_model}); review must run under a different runner or model"
+            )
 
     if task["status"] in {"todo", "in-progress"}:
         print(f"[pipeline] {task['id']}: dispatching to executor {exec_runner}/{exec_model}...", file=sys.stderr)
@@ -2978,6 +4043,14 @@ def cmd_pipeline(args: argparse.Namespace) -> dict:
     result = _run_post_completion(task["id"], args.state, agent_id=args.agent_id)
     state = load(state_path(args.state))
     task = task_map(state).get(task["id"])
+    if result.get("post_completion") in {"qa-manual", "review-manual"}:
+        return {
+            "task": task["id"] if task else args.id, "status": task["status"] if task else "unknown",
+            "post_completion": result["post_completion"],
+            "executor": f"{exec_runner}/{exec_model}",
+            "qa": f"{qa_runner}/{qa_model}" if qa_runner else "manual",
+            "reviewer": f"{rev_runner}/{rev_model}" if rev_runner else "manual",
+        }
     if not task or task["status"] != "done":
         status = task["status"] if task else "unknown"
         raise EngineError(
@@ -2987,8 +4060,8 @@ def cmd_pipeline(args: argparse.Namespace) -> dict:
     return {
         "task": task["id"], "status": "done",
         "executor": f"{exec_runner}/{exec_model}",
-        "qa": f"{qa_runner}/{qa_model}",
-        "reviewer": f"{rev_runner}/{rev_model}",
+        "qa": f"{qa_runner}/{qa_model}" if qa_runner else "manual",
+        "reviewer": f"{rev_runner}/{rev_model}" if rev_runner else "manual",
     }
 
 
@@ -3009,10 +4082,11 @@ def _write_task_handoff(
     """
     runner_label = f"{runner_name}/{model}" if model else runner_name
     state_flag = f" --state {state_arg}" if state_arg else ""
+    lease_flag = f" --agent-id {agent_id} --claim-id {task.get('claim_id')}" if agent_id and task.get("claim_id") else ""
     instructions = (
         f"Execute the task per the acceptance criteria above. Do not violate AGENTS.md. "
         f"When done, run: bash .ai/scripts/ai-kit{state_flag} transition {task['id']} "
-        f"complete --actor {task['owner']} --detail 'Completed by {runner_label}'"
+        f"complete --actor {task['owner']}{lease_flag} --detail 'Completed by {runner_label}'"
     )
     handoff = {
         "schema_version": 1,
@@ -3042,31 +4116,36 @@ def _write_task_handoff(
 
 def cmd_dispatch(args: argparse.Namespace) -> dict:
     import subprocess as _sp
-    state = load(state_path(args.state)); validate(state)
-    task = task_map(state).get(args.id)
-    if not task:
-        raise EngineError(f"unknown task: {args.id}")
+    state_file = state_path(args.state)
+    state = load(state_file); validate(state)
+    task = _resolve_task_definition(args.id, state, state_file)
     runner_name, runner, selected_model = _resolve_runner(args.runner, args.model)
     template = runner["command"]
+    agent_id = getattr(args, "agent_id", None) or uuid.uuid4().hex[:12]
     # The State Manager, not the runner, owns lifecycle transitions: claim the
     # task (todo -> in-progress) here so the runner only ever needs to report
     # completion, matching the single `complete` transition it is prompted for.
     if task["status"] == "todo":
-        start_args = argparse.Namespace(state=args.state, id=task["id"], action="start", actor=task["owner"], detail=f"auto-started for dispatch to runner '{runner_name}'", evidence=None, expected_revision=None, agent_id=getattr(args, "agent_id", None))
-        task = _retry_transition(start_args)
+        start_args = argparse.Namespace(state=args.state, id=task["id"], action="start", actor=task["owner"], detail=f"auto-started for dispatch to runner '{runner_name}'", evidence=None, expected_revision=None, agent_id=agent_id, claim_id=None, by=None)
+        _retry_transition(start_args)
+        # Re-resolve rather than reuse _retry_transition's return: that
+        # return is the raw workflow.json task (lifecycle-updated status
+        # only), which would silently drop the contract-file overlay above.
+        task = _resolve_task_definition(task["id"], load(state_file), state_file)
     elif task["status"] != "in-progress":
         raise EngineError(f"cannot dispatch {task['id']} from status {task['status']} (must be todo or in-progress)")
     state_flag = f" --state {args.state}" if args.state else ""
     runner_label = f"{runner_name}/{selected_model}" if selected_model else runner_name
+    lease_flag = f" --agent-id {agent_id} --claim-id {task.get('claim_id')}" if task.get("claim_id") else ""
     handoff_path = None
     route_payload = cmd_route(argparse.Namespace(state=args.state, id=task["id"], explain=False))
     if runner.get("input") == "json-file":
-        handoff_path = _write_task_handoff(task, route_payload, args.state, runner_name, runner, selected_model, getattr(args, "agent_id", None))
+        handoff_path = _write_task_handoff(task, route_payload, args.state, runner_name, runner, selected_model, agent_id)
         handoff_display = display_path(handoff_path)
-        prompt = f"You are {task['owner']}. Read and execute the task JSON at {handoff_display}. Do not violate AGENTS.md. When done, run: bash .ai/scripts/ai-kit{state_flag} transition {task['id']} complete --actor {task['owner']} --detail 'Completed by {runner_label}'"
+        prompt = f"You are {task['owner']}. Read and execute the task JSON at {handoff_display}. Do not violate AGENTS.md. When done, run: bash .ai/scripts/ai-kit{state_flag} transition {task['id']} complete --actor {task['owner']}{lease_flag} --detail 'Completed by {runner_label}'"
     else:
-        tasks_md = display_path(workspace(state_path(args.state)) / "tasks" / "tasks.md")
-        prompt = f"You are {task['owner']}. Execute task {task['id']} per the requirements in {tasks_md}. Do not violate AGENTS.md. When done, run: bash .ai/scripts/ai-kit{state_flag} transition {task['id']} complete --actor {task['owner']} --detail 'Completed by {runner_label}'"
+        tasks_md = display_path(workspace(state_file) / "tasks" / "tasks.md")
+        prompt = f"You are {task['owner']}. Execute task {task['id']} per the requirements in {tasks_md}. Do not violate AGENTS.md. When done, run: bash .ai/scripts/ai-kit{state_flag} transition {task['id']} complete --actor {task['owner']}{lease_flag} --detail 'Completed by {runner_label}'"
     # Runner templates hold {prompt} unquoted; shlex.quote is the single
     # place quoting happens, so a template can never double-quote it.
     cmd = _render_runner_command(template, prompt, selected_model)
@@ -3085,7 +4164,7 @@ def cmd_dispatch(args: argparse.Namespace) -> dict:
         "input_mode": runner.get("input") or "prompt",
         "handoff_file": display_path(handoff_path) if handoff_path else None,
     }
-    audit_path = workspace(state_path(args.state)) / f"dispatch_log_{task['id']}.json"
+    audit_path = _dispatch_audit_path(state_file, task["id"])
     audit_path.parent.mkdir(parents=True, exist_ok=True)
     audit_path.write_text(json.dumps(audit, indent=2) + "\n", encoding="utf-8")
     if result.returncode != 0:
@@ -3244,7 +4323,8 @@ def cmd_show(args: argparse.Namespace) -> dict:
     its own event history in one call, so a user debugging a stuck lifecycle
     does not have to cross-reference `timeline`/`drift`/`graph` by hand.
     """
-    state = load(state_path(args.state)); validate(state); sync_phases(state)
+    state_file = state_path(args.state)
+    state = load(state_file); validate(state); sync_phases(state)
     task_id = getattr(args, "id", None)
     if not task_id:
         return state
@@ -3268,7 +4348,7 @@ def cmd_show(args: argparse.Namespace) -> dict:
         "dependents": dependents,
         "acceptance": task.get("acceptance", []),
         "evidence": task.get("evidence", []),
-        "drift": _drift_flags(task),
+        "drift": _drift_flags(task, state_file),
         "events": events,
         "events_recent": events[-10:],
     }
@@ -3284,13 +4364,24 @@ def parser() -> argparse.ArgumentParser:
     update = sub.add_parser("update-task"); update.add_argument("id"); update.add_argument("--add-acceptance", nargs="+", action="append"); update.add_argument("--add-files", nargs="*"); update.add_argument("--add-tags", nargs="*"); update.add_argument("--actor", default="planner"); update.set_defaults(fn=cmd_update_task)
     ready = sub.add_parser("ready"); ready.add_argument("--context"); ready.add_argument("--epic"); ready.set_defaults(fn=cmd_ready)
     plan = sub.add_parser("plan"); plan.add_argument("--idea", required=True); plan.add_argument("--workflow", default="feature"); plan.add_argument("--owner", required=True); plan.add_argument("--acceptance", nargs="+", action="append", required=True); plan.add_argument("--files", nargs="*"); plan.add_argument("--tags", nargs="*"); plan.add_argument("--phase", default="build"); plan.add_argument("--context"); plan.add_argument("--epic"); plan.add_argument("--depends-on", action="append", default=[], metavar="PATH"); plan.add_argument("--scope"); plan.add_argument("--out-of-scope"); plan.add_argument("--risks", nargs="*"); plan.add_argument("--assumptions"); plan.add_argument("--actor", default="planner"); plan.add_argument("--force", action="store_true"); plan.set_defaults(fn=cmd_plan)
-    trans = sub.add_parser("transition"); trans.add_argument("id"); trans.add_argument("action", choices=TRANSITIONS); trans.add_argument("--actor", required=True); trans.add_argument("--detail"); trans.add_argument("--evidence", nargs="+"); trans.add_argument("--expected-revision", type=int); trans.add_argument("--agent-id", help="unique identity of the agent instance, appended to claimed_by as 'actor#agent_id' for audit when multiple agents share a role"); trans.add_argument("--by", metavar="TASK-ID", help="required for 'supersede': the task id that replaced this one"); trans.set_defaults(fn=cmd_transition)
+    plan_draft = sub.add_parser("plan-draft", help="create, revise, finalize, and materialize a collaborative plan draft")
+    plan_draft_sub = plan_draft.add_subparsers(dest="plan_draft_command", required=True)
+    draft_create = plan_draft_sub.add_parser("create"); draft_create.add_argument("id"); draft_create.add_argument("--title", required=True); draft_create.add_argument("--workflow", default="feature"); draft_create.add_argument("--problem", required=True); draft_create.add_argument("--scope", action="append", default=[]); draft_create.add_argument("--out-of-scope", action="append", default=[]); draft_create.add_argument("--acceptance", nargs="+", action="append", default=[]); draft_create.add_argument("--assumption", action="append", default=[]); draft_create.add_argument("--open-question", action="append", default=[]); draft_create.add_argument("--actor", default="planner"); draft_create.set_defaults(fn=cmd_plan_draft_create)
+    draft_update = plan_draft_sub.add_parser("update"); draft_update.add_argument("id"); draft_update.add_argument("--expected-revision", type=int, required=True); draft_update.add_argument("--summary", required=True); draft_update.add_argument("--title"); draft_update.add_argument("--problem"); draft_update.add_argument("--set-scope", nargs="*"); draft_update.add_argument("--set-out-of-scope", nargs="*"); draft_update.add_argument("--set-acceptance", nargs="+", action="append"); draft_update.add_argument("--add-scope", action="append"); draft_update.add_argument("--add-out-of-scope", action="append"); draft_update.add_argument("--add-acceptance", nargs="+", action="append"); draft_update.add_argument("--add-assumption", action="append"); draft_update.add_argument("--add-open-question", action="append"); draft_update.add_argument("--resolve-open-question", action="append"); draft_update.add_argument("--actor", default="planner"); draft_update.set_defaults(fn=cmd_plan_draft_update)
+    draft_add_task = plan_draft_sub.add_parser("add-task"); draft_add_task.add_argument("id"); draft_add_task.add_argument("task_id"); draft_add_task.add_argument("--expected-revision", type=int, required=True); draft_add_task.add_argument("--title", required=True); draft_add_task.add_argument("--owner", required=True); draft_add_task.add_argument("--phase", required=True); draft_add_task.add_argument("--needs", nargs="*"); draft_add_task.add_argument("--depends-on", action="append", default=[], metavar="PATH"); draft_add_task.add_argument("--acceptance", nargs="+", action="append", required=True); draft_add_task.add_argument("--files", nargs="*"); draft_add_task.add_argument("--tags", nargs="*"); draft_add_task.add_argument("--context"); draft_add_task.add_argument("--epic"); draft_add_task.add_argument("--actor", default="planner"); draft_add_task.set_defaults(fn=cmd_plan_draft_add_task)
+    draft_update_task = plan_draft_sub.add_parser("update-task"); draft_update_task.add_argument("id"); draft_update_task.add_argument("task_id"); draft_update_task.add_argument("--expected-revision", type=int, required=True); draft_update_task.add_argument("--summary", required=True); draft_update_task.add_argument("--title"); draft_update_task.add_argument("--owner"); draft_update_task.add_argument("--phase"); draft_update_task.add_argument("--context"); draft_update_task.add_argument("--epic"); draft_update_task.add_argument("--set-needs", nargs="*"); draft_update_task.add_argument("--set-depends-on", action="append", default=None, metavar="PATH"); draft_update_task.add_argument("--set-acceptance", nargs="+", action="append"); draft_update_task.add_argument("--set-files", nargs="*"); draft_update_task.add_argument("--set-tags", nargs="*"); draft_update_task.add_argument("--actor", default="planner"); draft_update_task.set_defaults(fn=cmd_plan_draft_update_task)
+    draft_finalize = plan_draft_sub.add_parser("finalize"); draft_finalize.add_argument("id"); draft_finalize.add_argument("--expected-revision", type=int, required=True); draft_finalize.add_argument("--confirmed-by-user", action="store_true", help="required after the Planner has shown the plan and the user explicitly approved it"); draft_finalize.add_argument("--actor", default="planner"); draft_finalize.set_defaults(fn=cmd_plan_draft_finalize)
+    draft_reopen = plan_draft_sub.add_parser("reopen"); draft_reopen.add_argument("id"); draft_reopen.add_argument("--expected-revision", type=int, required=True); draft_reopen.add_argument("--reason", required=True); draft_reopen.add_argument("--actor", default="planner"); draft_reopen.set_defaults(fn=cmd_plan_draft_reopen)
+    draft_materialize = plan_draft_sub.add_parser("materialize"); draft_materialize.add_argument("id"); draft_materialize.add_argument("--create-tasks", action="store_true", help="required after a separate explicit user request to create the task DAG"); draft_materialize.add_argument("--actor", default="planner"); draft_materialize.set_defaults(fn=cmd_plan_draft_materialize)
+    draft_show = plan_draft_sub.add_parser("show"); draft_show.add_argument("id"); draft_show.set_defaults(fn=cmd_plan_draft_show)
+    trans = sub.add_parser("transition"); trans.add_argument("id"); trans.add_argument("action", choices=TRANSITIONS); trans.add_argument("--actor", required=True); trans.add_argument("--detail"); trans.add_argument("--evidence", nargs="+"); trans.add_argument("--expected-revision", type=int); trans.add_argument("--agent-id", help="unique identity of the agent instance recorded in the task lease"); trans.add_argument("--claim-id", help="opaque task lease required to complete or block claimed work"); trans.add_argument("--by", metavar="TASK-ID", help="required for 'supersede': the task id that replaced this one"); trans.set_defaults(fn=cmd_transition)
     approve = sub.add_parser("approve"); approve.add_argument("id"); approve.add_argument("--role", choices=["qa", "review"], required=True); approve.add_argument("--status"); approve.add_argument("--reason", required=True); approve.add_argument("--runner"); approve.add_argument("--model"); approve.add_argument("--agent-id"); approve.set_defaults(fn=cmd_approve)
     verify = sub.add_parser("verify"); verify.add_argument("id"); verify.set_defaults(fn=cmd_verify)
     dispatch = sub.add_parser("dispatch"); dispatch.add_argument("id"); dispatch.add_argument("--runner"); dispatch.add_argument("--model"); dispatch.add_argument("--agent-id"); dispatch.set_defaults(fn=cmd_dispatch)
     dispatch_ready = sub.add_parser("dispatch-ready"); dispatch_ready.add_argument("--runner"); dispatch_ready.add_argument("--model"); dispatch_ready.add_argument("--limit", type=int); dispatch_ready.add_argument("--context"); dispatch_ready.add_argument("--epic"); dispatch_ready.add_argument("--agent-id"); dispatch_ready.set_defaults(fn=cmd_dispatch_ready)
     pipeline = sub.add_parser("pipeline"); pipeline.add_argument("id"); pipeline.add_argument("--agent-id"); pipeline.set_defaults(fn=cmd_pipeline)
     route = sub.add_parser("route"); route.add_argument("id"); route.add_argument("--explain", action="store_true"); route.set_defaults(fn=cmd_route)
+    activate = sub.add_parser("activate", help="select an isolated workflow as the active workspace"); activate.add_argument("workflow_state"); activate.set_defaults(fn=cmd_activate)
     status = sub.add_parser("status"); status.add_argument("--context"); status.add_argument("--epic"); status.set_defaults(fn=cmd_status)
     timeline = sub.add_parser("timeline"); timeline.set_defaults(fn=cmd_timeline)
     blocked = sub.add_parser("blocked"); blocked.set_defaults(fn=cmd_blocked)
@@ -3310,8 +4401,9 @@ def parser() -> argparse.ArgumentParser:
     epic_add = epic_sub.add_parser("add"); epic_add.add_argument("name"); epic_add.add_argument("--spec", required=True, help="path to the epic's Specification doc"); epic_add.add_argument("--owner"); epic_add.add_argument("--force", action="store_true", help="update an existing epic's spec, bumping its revision"); epic_add.set_defaults(fn=cmd_epic_add)
     epic_list = epic_sub.add_parser("list"); epic_list.set_defaults(fn=cmd_epic_list)
     drift = sub.add_parser("drift"); drift.add_argument("id"); drift.set_defaults(fn=cmd_drift)
+    backfill_contracts = sub.add_parser("backfill-contracts"); backfill_contracts.add_argument("id", nargs="?", help="task id to backfill; omit to cover every task in the state"); backfill_contracts.add_argument("--force", action="store_true", help="also regenerate a contract file that was hand-edited (hash_mismatch), discarding the edit"); backfill_contracts.add_argument("--actor", default="planner"); backfill_contracts.set_defaults(fn=cmd_backfill_contracts)
     onboard = sub.add_parser("onboard"); onboard.add_argument("--apply", action="store_true"); onboard.set_defaults(fn=cmd_onboard)
-    analyze = sub.add_parser("analyze"); analyze.set_defaults(fn=cmd_analyze)
+    analyze = sub.add_parser("analyze"); analyze.add_argument("--refresh", action="store_true", help="rebuild the project context snapshot even when its fingerprint is valid"); analyze.set_defaults(fn=cmd_analyze)
     architecture = sub.add_parser("architecture"); architecture_sub = architecture.add_subparsers(dest="architecture_command", required=True)
     architecture_discover = architecture_sub.add_parser("discover"); architecture_discover.set_defaults(fn=cmd_architecture_discover)
     show = sub.add_parser("show"); show.add_argument("id", nargs="?", help="task id to show full detail for; omit to dump the whole workflow state"); show.set_defaults(fn=cmd_show)

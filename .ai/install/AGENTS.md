@@ -113,7 +113,7 @@ the engine actually writes.
 | Role | Capability | `ai-kit` command / artifact |
 | --- | --- | --- |
 | Project Analyzer | Detects stack, tooling, and container/database runtime from the repo | `ai-kit onboard [--apply]` |
-| Project Analyzer / Knowledge Graph Builder | Combines onboard's detection with contexts.yaml's module + ownership graph and static-analysis risk signals (unowned context, dangling dependency, no verification command) | `ai-kit analyze` -> `.ai-work/analysis/project-summary.json` |
+| Project Analyzer / Knowledge Graph Builder | Combines onboard's detection with contexts.yaml's module + ownership graph and static-analysis risk signals (unowned context, dangling dependency, no verification command); reuses a valid versioned project-context snapshot | `ai-kit analyze [--refresh]` -> `.ai-work/analysis/project-summary.json` |
 | Impact Analyzer | Direct/transitive dependents and affected tasks for a module | `ai-kit context impact <name>` |
 | Task DAG Builder | Task graph with waves, ready set, and critical path | `ai-kit visualizer generate` -> `.visualizer/dag.json`, rendered at `.visualizer/dag.html` |
 | Execution Contract Builder | Self-contained JSON handoff for a dispatched task (owner, acceptance, routing, instructions) | written by `ai-kit dispatch` / `dispatch-ready` / `pipeline` to `.ai-work/handoffs/<task-id>.json` |
@@ -168,7 +168,7 @@ Every artifact a worker or external tool consumes carries an explicit
 version, so a consumer can detect a shape change instead of silently
 misreading a renamed or retyped field:
 
-- `.ai-work/state/workflow.json` has a top-level `version` (currently `2`);
+- `.ai-work/state/workflow.json` has a top-level `version` (currently `4`) and an immutable `workflow_id`; tasks claimed after this version carry an opaque lease identifier;
   `.ai/engine/state-schema.md` documents its fields.
 - `.ai-work/handoffs/<task-id>.json` (the Execution Contract Builder output)
   has `schema_version: 1`.
