@@ -1406,8 +1406,7 @@ class LocalScriptContractTests(unittest.TestCase):
 
 
 class RealRegistryTriggerTests(unittest.TestCase):
-    """Exercises the REAL .ai-config/registry.yaml and its install-template
-    copy, not a synthetic fixture -- because the bug this guards against
+    """Exercises the canonical install-template registry, not a synthetic fixture -- because the bug this guards against
     lives in the YAML content itself. _load_yaml_registry() is a simple
     line-based parser: a `match`/`core_skills`/`technology_skills` array
     split across multiple physical lines is silently mis-parsed into a
@@ -1417,10 +1416,7 @@ class RealRegistryTriggerTests(unittest.TestCase):
     actually edits the real file.
     """
 
-    REGISTRY_FILES = (
-        REPO_ROOT / ".ai-config" / "registry.yaml",
-        REPO_ROOT / ".ai" / "install" / "config" / "registry.yaml",
-    )
+    REGISTRY_FILES = (REPO_ROOT / ".ai" / "install" / "config" / "registry.yaml",)
 
     # AGENTS.md's mandatory-concerns table, plus the split-out AI-cost
     # trigger: each entry is (trigger id, a phrase it must match, a core
@@ -1510,14 +1506,10 @@ class RealRegistryTriggerTests(unittest.TestCase):
             text = registry_path.read_text(encoding="utf-8")
             self.assertNotIn("ai_triggers:", text, f"dead ai_triggers: block reintroduced in {registry_path}")
 
-    def test_owners_section_matches_between_registry_copies(self) -> None:
-        """Regression: the install-template copy was missing 'ai' from
-        owners.{architect,qa,security,integration,performance} even though
-        the live .ai-config/registry.yaml had it -- a fresh install would
-        route less than the repo it was copied from."""
-        live_owners = self._load_owners_from(self.REGISTRY_FILES[0])
-        template_owners = self._load_owners_from(self.REGISTRY_FILES[1])
-        self.assertEqual(live_owners, template_owners)
+    def test_ai_owner_roles_are_present_in_the_canonical_seed(self) -> None:
+        owners = self._load_owners_from(self.REGISTRY_FILES[0])
+        for role in ("architect", "qa", "security", "integration", "performance"):
+            self.assertIn("ai", owners.get(role, []), f"role '{role}' missing ai domain")
 
     def _load_owners_from(self, registry_path: Path) -> dict:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1533,14 +1525,16 @@ class RealRegistryTriggerTests(unittest.TestCase):
 
 
 class RegistryEndToEndRoutingTests(EngineTestCase):
-    """Runs cmd_route against the REAL registry.yaml and REAL .ai/skills
+    """Runs cmd_route against the canonical registry seed and REAL .ai/skills
     tree (only the workflow state file is isolated), so these assert what
     an actual `ai-kit route` invocation would return -- not what a
     synthetic fixture says it should."""
 
     def setUp(self) -> None:
         super().setUp()
-        # Point role/skill/config lookups at the real repo; only the
+        # Point role/skill/config lookups at the source kit; _config_path()
+        # resolves its canonical install seeds when no project config exists.
+        # Only the
         # workflow state itself stays in the isolated temp dir.
         ai_kit.ROOT = REPO_ROOT
 
@@ -1617,10 +1611,7 @@ class RegistryEndToEndRoutingTests(EngineTestCase):
         self.assertTrue(any("architecture-decisions" in s for s in skills), skills)
 
     def test_ai_owner_roles_get_ai_domain_skills_when_relevant(self) -> None:
-        """Regression: the install-template copy of registry.yaml was missing
-        'ai' from owners.{architect,qa,security,integration,performance},
-        even though the live .ai-config/registry.yaml had it -- a fresh
-        install silently routed less than the repo it was copied from."""
+        """The canonical registry seed assigns AI-capable roles to the AI domain."""
         self.init_workflow()
         for role in ("architect", "qa", "security", "integration", "performance"):
             registry = ai_kit._load_registry()

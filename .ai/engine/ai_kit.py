@@ -77,11 +77,37 @@ DEPENDENCY_SATISFYING_STATUSES = {"done", "superseded", "cancelled"}
 
 
 def _config_path(name: str) -> Path:
-    """Resolve project config from the new directory, with legacy fallback."""
+    """Resolve installed project config, or the kit's install template.
+
+    ``.ai-config`` is deliberately project-owned runtime configuration and is
+    created only by the installer.  Keeping the canonical seed files under
+    ``.ai/install/config`` lets the source repository run its own read-only
+    validation without tracking a second live configuration tree.
+    """
     if name not in CONFIG_FILES:
         raise EngineError(f"unsupported AI-Kit config: {name}")
     preferred = ROOT / ".ai-config" / name
-    return preferred if preferred.exists() else ROOT / ".ai" / name
+    return preferred if preferred.exists() else ROOT / ".ai" / "install" / "config" / name
+
+
+def _writable_config_path(name: str) -> Path:
+    """Return a project-owned config path, seeding it from the kit if needed.
+
+    Read operations may use an install template in the source repository;
+    mutations must never write that template.  This helper is intentionally
+    used only by config-changing commands and materializes `.ai-config/` in
+    the target project on first write.
+    """
+    if name not in CONFIG_FILES:
+        raise EngineError(f"unsupported AI-Kit config: {name}")
+    path = ROOT / ".ai-config" / name
+    if path.exists():
+        return path
+    path.parent.mkdir(parents=True, exist_ok=True)
+    template = ROOT / ".ai" / "install" / "config" / name
+    if template.exists():
+        path.write_bytes(template.read_bytes())
+    return path
 
 
 def _load_registry() -> dict:
@@ -508,7 +534,7 @@ def _write_runners(
     default_model: str | None,
     aliases: dict[str, str],
 ) -> None:
-    path = _config_path("runners.yaml")
+    path = _writable_config_path("runners.yaml")
     lines = []
     if default_executor:
         lines.append(f"default_executor: {_runner_scalar(default_executor)}")
@@ -2341,7 +2367,7 @@ def cmd_route(args: argparse.Namespace) -> dict:
 
 
 def cmd_context_add(args: argparse.Namespace) -> dict:
-    path = _config_path("contexts.yaml")
+    path = _writable_config_path("contexts.yaml")
     contexts = _load_contexts()
     if args.name in contexts and not args.force:
         raise EngineError(f"context already registered: {args.name}; use --force to update it (bumps revision)")
@@ -2476,7 +2502,7 @@ def cmd_epic_add(args: argparse.Namespace) -> dict:
     detectable as stale via `ai-kit drift`. Registration is optional — `epic`
     still works as a free-form tag with no entry here.
     """
-    path = _config_path("epics.yaml")
+    path = _writable_config_path("epics.yaml")
     epics = _load_epics()
     if args.name in epics and not args.force:
         raise EngineError(f"epic already registered: {args.name}; use --force to update it (bumps revision)")
@@ -3058,7 +3084,7 @@ def cmd_onboard(args: argparse.Namespace) -> dict:
     proposal = {"stack": sorted(set(stacks)), "source_dirs": sorted(set(sources)),
                 "verification": commands, "container_runtime": runtime}
     if args.apply:
-        manifest = _config_path("kit.yaml")
+        manifest = _writable_config_path("kit.yaml")
         backup = manifest.with_suffix(".yaml.bak")
         backup.write_text(manifest.read_text(encoding="utf-8"), encoding="utf-8")
         text = manifest.read_text(encoding="utf-8")

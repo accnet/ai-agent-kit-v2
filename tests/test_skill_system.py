@@ -21,8 +21,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SKILLS_FOR = REPO_ROOT / ".ai" / "scripts" / "skills-for.sh"
 CHECK_SKILLS = REPO_ROOT / ".ai" / "scripts" / "check-skills.sh"
-REGISTRY = REPO_ROOT / ".ai-config" / "registry.yaml"
-KIT_YAML = REPO_ROOT / ".ai-config" / "kit.yaml"
+REGISTRY = REPO_ROOT / ".ai" / "install" / "config" / "registry.yaml"
 
 
 def run_skills_for(args: list[str], root: Path | None = None) -> tuple[int, str]:
@@ -230,13 +229,13 @@ class SkillsForRoleRoutingTests(unittest.TestCase):
     These assert step (c) of skills-for.sh's documented stack-resolution
     order -- "role's domain list from owners: in registry.yaml" -- which by
     definition only applies when no stack narrows the result first. They
-    therefore run against a root that shares the REAL registry.yaml and the
+    therefore run against a root that shares the canonical install registry and the
     REAL .ai/skills tree (so the owner mappings under test are the live
     ones) but pins project.stack to empty.
 
     They used to run against the repo root directly and passed only because
     this repo happened to ship `project.stack: []`. Once the kit started
-    dogfooding its own config (`stack: [python]`), step (b) took priority
+    source fixture config, step (b) took priority
     and six of these broke -- correct engine behavior, an accidental test
     dependency on ambient project config.
     """
@@ -309,9 +308,16 @@ class SkillsForRoleRoutingTests(unittest.TestCase):
         self.assertIn(".ai/skills/core/observability/SKILL.md", out)
 
     def test_configured_stack_takes_priority_over_role_owners(self) -> None:
-        """The flip side, asserted against the repo's own dogfooded config:
-        with project.stack set, step (b) narrows before role owners apply."""
-        out = run_skills_for(["security"])[1]
+        """A generated project config with a stack narrows before role owners."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / ".ai").symlink_to(REPO_ROOT / ".ai")
+            (root / ".ai-config").mkdir()
+            (root / ".ai-config" / "kit.yaml").write_text(
+                "project:\n  stack: [backend]\n", encoding="utf-8"
+            )
+            (root / ".ai-config" / "registry.yaml").write_bytes(REGISTRY.read_bytes())
+            out = run_skills_for(["security"], root=root)[1]
         self.assertNotIn(".ai/skills/ai/openai/overview.md", out)
         self.assertIn(".ai/skills/core/security-review/SKILL.md", out)
 
@@ -471,4 +477,3 @@ class RegistryValidityTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
