@@ -30,8 +30,8 @@ runners:
     description: "Claude CLI runner"
     input: "json-file"
   codex-cli:
-    command: "echo '' | codex exec -m {model} {prompt}"
-    models: ["gpt-5.6-luna","gpt-5.6-terra", "gpt-5.4", "gpt-5.4-mini"]
+    command: "codex exec -m {model} --sandbox danger-full-access --ask-for-approval never {prompt}"
+    models: ["gpt-5.6-luna"]
     provider: "codex-cli"
     description: "Codex CLI runner"
     input: "json-file"

@@ -1,9 +1,12 @@
 # Workflow State Schema
 
 `workflow.json` contains `version`, `title`, `workflow`, `tasks`, `phases`,
-and `events`. A task has `id`, `title`, `owner`, `phase`, `needs`, `status`,
+`events`, and (for a materialized collaborative draft) `source_plan`. New
+workflow states use schema version `4`; version `4` adds an immutable
+`workflow_id` namespace and per-task claim lease fields. A task has
+`id`, `title`, `owner`, `phase`, `needs`, `status`,
 `acceptance`, `files`, `tags`, `attempts`, `evidence`, `blocked_reason`,
-`claimed_by`, `context`, `epic`, `base_commit`, `context_revision`,
+`claimed_by`, `claim_id`, `claim_expires_at`, `context`, `epic`, `base_commit`, `context_revision`,
 `epic_revision`, `depends_on`, and `contract_hashes`.
 Phase state is derived: `planned`,
 `open`, or `complete`. `claimed_by` records the actor who started the task —
@@ -43,6 +46,130 @@ editing `workflow.json` by hand.
 occurrence accumulates instead of the last one silently overwriting the
 rest.
 
+## Project context snapshot cache
+
+`ai-kit analyze` persists the project-context snapshot at
+`.ai-work/analysis/project-summary.json` (or the equivalent workspace when
+`--state` is supplied). Its top-level `schema_version` is currently `2`; the
+new `context_snapshot` object has its own `schema_version` (`1`), an input
+`fingerprint`, and only the bounded inputs used to validate it. Those inputs
+are hashes of the analyzer's configuration/marker files plus the Git HEAD and
+the digest of Git's tracked raw working-tree diff. It detects a config change, a
+commit change, or any tracked edit without the engine opening every source
+file or walking the repository.
+
+When the fingerprint matches, `analyze` returns `cache.status: "hit"` and
+reuses the artifact. A missing, malformed, old-schema, stale, or explicitly
+`--refresh`ed snapshot is rebuilt and reports `"refreshed"`. `route` performs
+the same bounded validation, refreshes only if needed, and adds the snapshot
+to its `context` list plus a structured `project_context` reference. The
+cache intentionally does not claim to detect untracked source-only changes;
+run `ai-kit analyze --refresh` after introducing relevant untracked files or
+add them to Git. This is a project summary/index, not raw chat history or a
+source-code vector store.
+
+## Collaborative plan draft schema
+
+Chat/planning state lives separately at
+`.ai-work/requirements/plans/<plan-id>.json` (schema version `1`). It has
+`id`, `title`, `workflow`, `status` (`drafting`, `ready`, or
+`materialized`), an optimistic `revision`, a structured `brief`, proposed
+`tasks`, append-only `history`, and optional `materialization` metadata. The
+brief contains `problem`, `scope`, `out_of_scope`, `acceptance`,
+`assumptions`, and `open_questions`; it intentionally records the distilled
+plan, never raw chat history.
+
+A draft is not lifecycle state and is never read by `ready`, `dispatch`, or
+`pipeline`. `plan-draft finalize` rejects incomplete briefs, unresolved open
+questions, invalid owners/contexts, missing acceptance criteria, unknown task
+dependencies, and dependency cycles; it also requires the explicit
+`--confirmed-by-user` acknowledgement. `plan-draft materialize` additionally
+requires a separate `--create-tasks` acknowledgement and is the sole
+bridge into execution: it writes a new `workflow.json` with the draft's tasks
+and a top-level `source_plan` object (`id`, source `revision`, definition
+`digest`, draft path). The create-only state write rejects an existing target,
+while re-running materialization for that same recorded source is idempotent.
+This gives chat revisions a durable audit trail without allowing a chat turn
+to bypass G1/G2/G3 lifecycle gates.
+
+## Task contract files
+
+`add-task` and `plan` write `.ai-work/tasks/<task-id>.json` alongside the
+task's entry in `workflow.json` -- a self-contained snapshot of the task's
+*definitional* fields: `schema_version` (currently `1`,
+`TASK_CONTRACT_SCHEMA_VERSION`), `task_id`, `revision` (starts at `1`),
+`title`, `owner`, `phase`, `needs`, `depends_on`, `acceptance`, `files`,
+`tags`, `context`, `epic`, `base_commit`, `created_at`, `updated_at`.
+*Lifecycle* fields (`status`, `attempts`, `claimed_by`, `evidence`,
+`blocked_reason`, `contract_hashes`) stay exclusively in `workflow.json` --
+the contract file is not a second lifecycle source, only a stable
+description of what the task is, independent of `workflow.json`'s size and
+lifecycle churn.
+
+Every task also carries `contract_revision` and `contract_hash` on its
+`workflow.json` entry -- the revision and SHA-256 content hash of the
+contract file as of the last write that produced it. Both are `null` for a
+task that has no contract file yet. `_build_task_contract` computes the
+on-disk bytes and hash together (never two separate serializations of the
+"same" content), so the recorded hash always matches the file
+`add-task`/`plan`/`update-task` actually wrote.
+
+`route`, `dispatch`, and `pipeline` resolve a task through
+`_resolve_task_definition`: when `.ai-work/tasks/<id>.json` exists, its
+definitional fields override the same-named fields on the workflow.json
+task before routing/handoff/prompt-building reads them; lifecycle fields
+(`status`, `attempts`, `claimed_by`, `evidence`, `blocked_reason`) always
+come from `workflow.json` regardless. When no contract file exists yet (a
+task created before this feature), resolution falls back to the
+workflow.json task unchanged -- dispatching an unmigrated task is not an
+error. `dispatch` re-resolves after claiming a task (`todo` -> `in-progress`)
+rather than reusing the transition's return value, so the contract overlay
+survives the status change instead of being silently dropped.
+
+`update-task` rewrites the contract file whenever it changes `acceptance`,
+`files`, or `tags`: it bumps `contract_revision` by one, preserves the
+contract's original `created_at` (read off the existing file via
+`_existing_contract_created_at`, or stamped fresh if the task has never had
+one), stamps a new `updated_at`, and records the new hash on the
+workflow.json task in the same write that saves `workflow.json` -- both are
+written from one `_build_task_contract` call, so they cannot disagree with
+each other even if the process is killed between the two writes (the
+contract file write happens after `save()` succeeds; a crash between them
+just leaves the old file one write behind, caught as `task_contract_drift:
+"missing"`/`"hash_mismatch"` below on next read, not silently accepted).
+
+A task created before this feature has `contract_revision`/`contract_hash`
+both `null` and no contract file; it runs on `_resolve_task_definition`'s
+fallback path above until either `update-task` touches it (which creates
+its first contract, revision `1`) or `ai-kit backfill-contracts [id]
+[--force] [--actor ACTOR]` writes one directly. `backfill-contracts` scopes
+to a single task id or covers every task in the state by default; it is
+idempotent (a task whose contract already matches its recorded hash is
+reported under `up_to_date`, untouched) and buckets the rest into
+`migrated` (no `contract_hash` recorded yet), `restored` (hash recorded but
+the file is gone -- nothing to protect, rewritten unconditionally), and
+`protected` (`hash_mismatch`/`unavailable` -- left alone unless `--force`,
+since overwriting would silently discard a hand edit; `--force` moves these
+into `regenerated`). This is what backfilled contract files for this repo's
+pre-existing tasks. `null` `contract_hash` is not itself a drift signal --
+see below.
+
+`drift`, `board`, and `show` report `task_contract_drift` (via the shared
+`_task_contract_drift` check): `null` when the on-disk file's hash matches
+the recorded `contract_hash`, or when the task has no recorded hash yet
+(nothing to compare -- not the same as stale). Otherwise a short reason:
+`"missing"` (a hash is recorded but the file is gone), `"unavailable"`
+(exists but unreadable), or `"hash_mismatch"` -- the practical signal that
+someone edited the file directly instead of going through `update-task`,
+since those three commands are the only writers and always keep the
+recorded hash and the file in sync. `board` surfaces this as a
+`task-contract-missing` / `task-contract-unavailable` /
+`task-contract-hash-mismatch` flag alongside the existing
+`contract-stale`/`drift-unavailable` flags for `depends_on` paths -- a
+different signal about a different file, not a duplicate. None of this
+blocks a transition; it is read-time detection, not prevention. Do not
+hand-edit a contract file; treat it as generated output.
+
 ## Context / module boundaries
 
 `context` is an optional free-form tag naming the bounded context or
@@ -55,6 +182,32 @@ can be filtered with `--context`. When `module_boundary` is enabled in
 is what lets multiple agents work different services (api/ui/database) in
 parallel without silently stepping on each other's files. A task with no
 `context` is never checked by G6.
+
+## File conflict check (G7)
+
+`needs` is how a task declares "run me after that one" -- but nothing
+previously stopped two tasks with an undeclared relationship from both
+touching the same file, which is exactly how two dispatch calls (or two
+different agents/processes adding tasks against the same `workflow.json`)
+race on a file. When `file_conflict_check` is enabled in
+`.ai-config/rules.yaml` (default `true`), gate **G7** runs on the `start`
+transition (so it covers `dispatch`/`dispatch-ready` too, since both claim a
+task via `start`): before a task starts, it checks every other task whose
+status isn't `done`/`superseded`/`cancelled` for a `files` overlap. If a
+match is found and neither task is a transitive `needs` dependency of the
+other, the `start` is rejected -- a `needs` edge already orders two tasks
+safely (G1 blocks the dependent from starting first), so this only fires on
+overlaps `needs` doesn't already cover, including against a `todo` task
+(not just an `in-progress` one), since an unscheduled but planned overlap is
+the same race waiting to happen. The fix is to add the missing `needs`
+edge (task creation is otherwise fixed once made — there is no
+`update-task --add-needs`, so this means re-planning the dependency, not
+patching it on), wait for the conflicting task to finish, or explicitly
+`file_conflict_check: false` for a repo that intentionally coordinates
+overlapping files some other way. `dispatch-ready` already treats any
+`EngineError` from a claim attempt as "skip this task, try the next" (see
+Parallel agents below), so a G7 rejection there is a silent skip, not a
+crashed batch.
 
 `epic` is an optional free-form tag grouping tasks that belong to the same
 blueprint/feature across services (a blueprint split into api+ui+db tasks
@@ -164,7 +317,8 @@ profiles remain readable during migration.
 to the configured default pair. An explicit
 `ai-kit dispatch <id> --runner X --model M` is permitted only when `M` is
 declared by X and records the resolved model/provider in
-`dispatch_log_<id>.json`.
+`.ai-work/dispatch/<id>.json`. QA/review dispatches use the same collection
+as `.ai-work/dispatch/qa_<id>.json` and `.ai-work/dispatch/review_<id>.json`.
 `ai-kit dispatch-ready [--runner X] [--model M]` is the automatic safety-sensitive path:
 it only ever runs the configured `default_executor` — an explicit `--runner
 X` or `--model M` that differs from the configured pair is an `EngineError`
@@ -181,12 +335,13 @@ static-analysis risk signals (`unowned_context`: a registered context with no
 `owner`; `dangling_dependency`: a `depends_on` entry naming a context that
 doesn't exist, which can only happen via a hand-edit since `context add`
 validates this at write time; `no_verification_command`: nothing detected for
-`kit.yaml`'s test/lint/build commands). It writes
-`.ai-work/analysis/project-summary.json` (`schema_version: 1`) on every call
-and also returns the same dict, mirroring `onboard`'s existing proposal
-shape. The "knowledge graph" here is exactly what `contexts.yaml` declares --
-not a parser for arbitrary source languages; see AGENTS.md's Platform
-Capability Map for the scope boundary.
+`kit.yaml`'s test/lint/build commands). It persists a versioned
+`.ai-work/analysis/project-summary.json` (`schema_version: 2`) and reuses it
+when the bounded project fingerprint is valid; `--refresh` rebuilds it. The
+returned dict additionally reports whether this invocation was a cache `hit`
+or `refreshed`. The "knowledge graph" here is exactly what `contexts.yaml`
+declares -- not a parser for arbitrary source languages; see AGENTS.md's
+Platform Capability Map for the scope boundary.
 
 ## Visualizer artifact versioning
 

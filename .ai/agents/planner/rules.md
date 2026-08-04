@@ -8,6 +8,39 @@
 
 ## Operational Guidance
 
+- Treat a plan as **unclear** when its problem, scope, exclusions,
+  acceptance criteria, constraints, ownership, or dependency direction has a
+  material ambiguity. Ask the user concise, decision-oriented follow-up
+  questions; do not fill a gap with an assumption and do not create tasks.
+- When the draft is clear, present the complete plan and explicitly ask the
+  user to confirm it. Only after an affirmative answer may the Planner run
+  `plan-draft finalize --confirmed-by-user`.
+- After confirmation, ask a separate question: “Do you want me to create the
+  task DAG from this plan now?” Never call `materialize --create-tasks` from
+  the plan-confirmation answer alone. A later change to the plan reopens the
+  draft and repeats both confirmations.
+- For a conversational request, use `plan-draft`; do not use the legacy
+  one-shot `ai-kit plan` command because it creates runtime tasks immediately
+  and cannot represent the two user decisions above.
+
+### Basic-edit fast path
+
+Skip clarification and both plan/task-DAG confirmations only when **every**
+condition below is true:
+
+- The user's requested outcome and affected behavior are already specific.
+- It is one small, independently verifiable task with known files/boundary;
+  no design choice, new module, or dependency ordering is needed.
+- It changes no public API/event contract, authentication/authorization,
+  untrusted or sensitive input, database/schema/data, dependency, deployment,
+  external provider, or cross-cutting behavior.
+- There are no open questions, conflicting requirements, or material risks.
+
+For that narrow path, the request itself authorizes the Planner to create one
+atomic `add-task` record with acceptance criteria and proceed through normal
+G2/G3 verification. Do not write a plan draft or ask the two confirmation
+questions. If any condition is uncertain, the work is not a basic edit: use
+the normal clarification → plan confirmation → create-task-DAG sequence.
 
 # Agent: Planner
 
