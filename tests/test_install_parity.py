@@ -1,115 +1,48 @@
-"""Parity between what this repo runs and what the installer ships.
+"""Installer contract for project-owned AI-Kit configuration.
 
-The kit keeps two copies of several things: the live config the repo itself
-uses (`.ai-config/`, `.visualizer/`) and the copies `install.sh` seeds new
-projects from (`.ai/install/config/`, `.ai/install/templates/.visualizer/`).
-Nothing structural forces them to agree, and they have silently drifted more
-than once -- most consequentially when the template's `registry.yaml` was
-missing `ai` from `owners` for five roles, so a freshly installed project
-routed strictly less than the repo it was copied from, with no error anywhere.
-
-These tests pin the parts that must match while allowing the parts that are
-deliberately project-owned to diverge. `kit.yaml` is the notable exception:
-its whole purpose is per-project configuration (this repo declares a real
-stack and test command; the template ships unconfigured sentinels so a fresh
-install is honestly reported as un-onboarded by doctor.sh), so only its
-*shape* is compared, never its values.
+The source kit tracks only `.ai/install/config/`.  Its installer materializes
+that directory as `.ai-config/` in a consuming project and must never require
+or recreate a source-repository `.ai-config/` tree.
 """
 from __future__ import annotations
 
 import re
-import sys
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-ENGINE_DIR = REPO_ROOT / ".ai" / "engine"
-sys.path.insert(0, str(ENGINE_DIR))
-import ai_kit  # noqa: E402
-
-LIVE_CONFIG = REPO_ROOT / ".ai-config"
 TEMPLATE_CONFIG = REPO_ROOT / ".ai" / "install" / "config"
 LIVE_VISUALIZER = REPO_ROOT / ".visualizer"
 TEMPLATE_VISUALIZER = REPO_ROOT / ".ai" / "install" / "templates" / ".visualizer"
 
-# Config files that must be byte-identical between the two copies. These hold
-# kit-wide routing/policy that a project has no reason to fork on install.
-IDENTICAL_CONFIGS = ("registry.yaml", "rules.yaml", "runners.yaml", "automation.yaml")
-
-# Config files that are project-owned: the template seeds an empty/neutral
-# version and the project fills it in. Compared on shape only, or not at all.
-SHAPE_ONLY_CONFIGS = ("kit.yaml",)
 PROJECT_OWNED_CONFIGS = ("contexts.yaml", "epics.yaml")
+EXPECTED_CONFIGS = {
+    "automation.yaml", "contexts.yaml", "epics.yaml", "kit.yaml",
+    "registry.yaml", "rules.yaml", "runners.yaml",
+}
 
+class InstallConfigTests(unittest.TestCase):
+    def test_source_repository_has_no_project_config_directory(self) -> None:
+        self.assertFalse((REPO_ROOT / ".ai-config").exists())
 
-def top_level_keys(text: str) -> set[str]:
-    return {m.group(1) for m in re.finditer(r"^([A-Za-z_][\w-]*):", text, re.MULTILINE)}
+    def test_templates_are_the_complete_canonical_seed_set(self) -> None:
+        self.assertEqual({p.name for p in TEMPLATE_CONFIG.glob("*.yaml")}, EXPECTED_CONFIGS)
 
-
-class ConfigParityTests(unittest.TestCase):
-    def test_both_config_directories_hold_the_same_file_set(self) -> None:
-        live = {p.name for p in LIVE_CONFIG.glob("*.yaml")}
-        template = {p.name for p in TEMPLATE_CONFIG.glob("*.yaml")}
-        self.assertEqual(
-            live, template,
-            "install.sh seeds .ai-config/ from .ai/install/config/, so a file present in "
-            "one and not the other is either unshipped config or an orphan template",
-        )
-
-    def test_policy_configs_are_byte_identical(self) -> None:
-        for name in IDENTICAL_CONFIGS:
-            with self.subTest(config=name):
-                live = (LIVE_CONFIG / name).read_bytes()
-                template = (TEMPLATE_CONFIG / name).read_bytes()
-                self.assertEqual(
-                    live, template,
-                    f".ai-config/{name} and .ai/install/config/{name} differ; a new install "
-                    f"would behave differently from this repo. Copy the live file over the "
-                    f"template (or vice versa) so the two stay in sync.",
-                )
-
-    def test_project_owned_configs_match_in_shape_not_content(self) -> None:
-        """kit.yaml legitimately differs (this repo is onboarded, the template
-        is not), but a section added to one must be added to the other."""
-        for name in SHAPE_ONLY_CONFIGS:
-            with self.subTest(config=name):
-                live = top_level_keys((LIVE_CONFIG / name).read_text(encoding="utf-8"))
-                template = top_level_keys((TEMPLATE_CONFIG / name).read_text(encoding="utf-8"))
-                self.assertEqual(
-                    live, template,
-                    f"{name} top-level sections diverged between the live config and the "
-                    f"install template",
-                )
-
-    def test_registry_routing_sections_agree_semantically(self) -> None:
-        """Byte-parity above already covers registry.yaml, but assert the
-        parsed routing data too: this is the drift that actually bit (the
-        template was missing `ai` from owners for five roles), and it is
-        worth failing on the meaning rather than only on the bytes."""
-        live = self._parsed(LIVE_CONFIG / "registry.yaml")
-        template = self._parsed(TEMPLATE_CONFIG / "registry.yaml")
-        self.assertEqual(live["owners"], template["owners"])
-        self.assertEqual(live["triggers"], template["triggers"])
-
-    @staticmethod
-    def _parsed(registry_path: Path) -> dict:
+    def test_installer_materializes_project_config_from_templates(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            (root / ".ai-config").mkdir()
-            (root / ".ai-config" / "registry.yaml").write_bytes(registry_path.read_bytes())
-            saved = ai_kit.ROOT
-            ai_kit.ROOT = root
-            try:
-                return {
-                    "owners": ai_kit._load_registry()["owners"],
-                    "triggers": {
-                        name: (sorted(t["match"]), sorted(t["core_skills"]), sorted(t["technology_skills"]))
-                        for name, t in ai_kit._load_skill_triggers().items()
-                    },
-                }
-            finally:
-                ai_kit.ROOT = saved
+            project = Path(tmp) / "project"
+            project.mkdir()
+            result = subprocess.run(
+                ["bash", str(REPO_ROOT / ".ai" / "install" / "install.sh"), "--target", str(project)],
+                capture_output=True, text=True,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            installed = project / ".ai-config"
+            self.assertEqual({p.name for p in installed.glob("*.yaml")}, EXPECTED_CONFIGS)
+            for name in EXPECTED_CONFIGS:
+                self.assertEqual((installed / name).read_bytes(), (TEMPLATE_CONFIG / name).read_bytes())
 
     def test_project_owned_configs_ship_empty(self) -> None:
         """contexts.yaml and epics.yaml describe one specific project. The

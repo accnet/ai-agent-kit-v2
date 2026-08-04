@@ -2,7 +2,8 @@
 # Print v2 knowledge documents relevant to a role and optional stack override.
 # Stack is resolved in priority order:
 #   1. Explicit second argument (override)
-#   2. project.stack from .ai-config/kit.yaml
+#   2. project.stack from installed .ai-config/kit.yaml (or the kit's
+#      .ai/install/config/kit.yaml seed when run from the source repository)
 #   3. Empty (no stack-specific filtering; uses registry owners)
 #
 # Environment variable override for testing:
@@ -13,11 +14,15 @@ ROOT="${SKILLS_FOR_ROOT:-$(cd "$(dirname "$0")/../.." && pwd)}"
 cd "$ROOT"
 role="${1:-any}"
 override="${2:-}"
+CONFIG_ROOT=".ai-config"
+if [[ ! -d "$CONFIG_ROOT" && -d ".ai/install/config" ]]; then
+  CONFIG_ROOT=".ai/install/config"
+fi
 
 # Read project.stack from kit.yaml when no explicit override is given.
 # Uses only awk to stay dependency-free.
 kit_stack=""
-if [[ -z "$override" && -f ".ai-config/kit.yaml" ]]; then
+if [[ -z "$override" && -f "$CONFIG_ROOT/kit.yaml" ]]; then
   # Extract the value of "stack:" under the "project:" block.
   # Handles: stack: [openai, rag]  or  stack: []  or missing key.
   kit_stack="$(awk '
@@ -33,7 +38,7 @@ if [[ -z "$override" && -f ".ai-config/kit.yaml" ]]; then
       print
       exit
     }
-  ' .ai-config/kit.yaml 2>/dev/null || true)"
+  ' "$CONFIG_ROOT/kit.yaml" 2>/dev/null || true)"
 fi
 
 # Determine the effective stack (space-separated list or empty).
@@ -49,7 +54,7 @@ if [[ -z "$stack" ]]; then
   domains="$(awk -v role="$role" '
     $1 == role ":" {gsub(/.*\[/, ""); gsub(/\].*/, ""); gsub(/,/, " "); print; found=1}
     END {if (!found) print "any"}
-  ' .ai-config/registry.yaml)"
+  ' "$CONFIG_ROOT/registry.yaml")"
 else
   # Each stack value may be a domain name (e.g. "ai", "backend") or a
   # technology name (e.g. "openai", "rag"). Resolve both.

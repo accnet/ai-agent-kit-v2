@@ -6,9 +6,10 @@ the planning, validation, and review controls proven in v1.
 
 ## Quick Start
 
-1. Adapt `project` and `verification` in `.ai-config/kit.yaml` for the host project.
-2. Run `bash .ai/scripts/bootstrap.sh` and `bash .ai/scripts/doctor.sh`.
-3. Initialize a workflow, add tasks with acceptance criteria, then validate it.
+1. Copy `.ai/` into the host project and run `bash .ai/install/install.sh`.
+2. Adapt the generated `.ai-config/kit.yaml` for that host project.
+3. Run `bash .ai/scripts/bootstrap.sh` and `bash .ai/scripts/doctor.sh`.
+4. Initialize a workflow, add tasks with acceptance criteria, then validate it.
 
 ```bash
 python .ai/engine/ai_kit.py init --title "My feature" --workflow feature --force
@@ -123,11 +124,11 @@ Both installers stop before replacing a different managed file. Use
 - `.ai/modules/`: gates and operating standards.
 - `.ai/scripts/`: v2 adapters for v1 bootstrap, scheduling, state, context,
   skill validation, and commit-hygiene automation.
-- `.ai/install/`: installer, root-adapter templates, and `.ai-config/` seed
-  files used to onboard a host project.
-- `.ai-config/`: project-owned configuration (`kit.yaml`, `rules.yaml`,
-  `runners.yaml`, `contexts.yaml`, `epics.yaml`, `registry.yaml`,
-  `automation.yaml`); never overwritten by re-installs.
+- `.ai/install/`: installer, root-adapter templates, and configuration seeds
+  used to create `.ai-config/` in a host project.
+- `.ai-config/`: generated project-owned configuration; it is intentionally
+  not tracked in the AI-Kit source repository and is never overwritten by
+  re-installs.
 - `.ai-work/`: current plan, tasks, and ephemeral state.
 
 ## Skill Validation Modes
